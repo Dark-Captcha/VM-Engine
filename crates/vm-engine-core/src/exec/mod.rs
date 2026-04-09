@@ -520,10 +520,11 @@ impl<'m, H: Hook> Interpreter<'m, H> {
                 Err(Error::exec(format!("uncaught throw: {val}")))
             }
             Terminator::Unreachable => {
-                Err(Error::exec(format!(
-                    "reached unreachable block at cursor {}",
-                    self.state.cursor
-                )))
+                // In multi-function decoders, some blocks are created by forward jumps
+                // but never filled (the decoder skips over them via JMP_FWD).
+                // Treat as halt — the interpreter can't continue from here.
+                self.state.halted = true;
+                Ok(false)
             }
         }
     }

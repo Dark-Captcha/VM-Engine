@@ -860,8 +860,8 @@ pub fn decode_plv3_multifunc(bytecode: &[u8]) -> (Module, DecodeStats) {
 
 /// Decode a bytecode region into the current IR function.
 ///
-/// `base_pc` is added to reader positions to get absolute PCs (for source locations
-/// and jump target resolution).
+/// Uses a worklist approach: starts from base_pc, follows all reachable paths.
+/// Blocks are created on demand. Unreachable code is naturally excluded.
 fn decode_region(
     region_bytecode: &[u8],
     base_pc: usize,
@@ -870,50 +870,58 @@ fn decode_region(
     func_names: &std::collections::HashMap<usize, String>,
     skip_ranges: &[(usize, usize)],
 ) {
-    let mut reader = Plv3Reader::new(region_bytecode);
-    let mut sym_stack: Vec<Var> = Vec::new();
-
-    // Find block starts within this region, skipping function body ranges.
-    // Both the scanner and the targets are filtered to exclude function bodies.
-    let mut block_starts = find_block_starts_in_region_skipping(region_bytecode, base_pc, skip_ranges);
-
-    let entry_block = builder.create_and_switch(&format!("entry_{base_pc}"));
-    let mut current_block = entry_block;
     let mut block_map: std::collections::HashMap<usize, BlockId> = std::collections::HashMap::new();
+    let mut decoded_blocks: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut worklist: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+
+    // Create entry block and seed the worklist
+    let entry_block = builder.create_and_switch(&format!("entry_{base_pc}"));
     block_map.insert(base_pc, entry_block);
+    worklist.push_back(base_pc);
 
-    for &target_pc in &block_starts {
-        if target_pc != base_pc && !block_map.contains_key(&target_pc) {
-            let block = builder.create_block(&format!("block_{target_pc}"));
-            block_map.insert(target_pc, block);
+    while let Some(block_start_pc) = worklist.pop_front() {
+        if !decoded_blocks.insert(block_start_pc) {
+            continue; // already decoded this block
         }
-    }
 
-    let mut block_terminated = false;
+        // Skip if inside a function body
+        if skip_ranges.iter().any(|(start, end)| block_start_pc >= *start && block_start_pc < *end) {
+            continue;
+        }
 
-    while !reader.at_end() {
-        let relative_pc = reader.position;
-        let absolute_pc = base_pc + relative_pc;
+        let current_block = get_or_create_block(block_start_pc, &mut block_map, builder);
+        builder.switch_to(current_block);
 
-        let needs_new_block = (relative_pc > 0 && block_map.contains_key(&absolute_pc))
-            || block_terminated;
+        let relative_start = block_start_pc.saturating_sub(base_pc);
+        if relative_start >= region_bytecode.len() {
+            builder.halt();
+            continue;
+        }
 
-        if needs_new_block {
-            let target_block = if let Some(&existing) = block_map.get(&absolute_pc) {
-                existing
-            } else {
-                let new_block = builder.create_block(&format!("block_{absolute_pc}"));
-                block_map.insert(absolute_pc, new_block);
-                new_block
-            };
-            if !block_terminated {
-                builder.jump(target_block);
+        let mut reader = Plv3Reader::new(&region_bytecode[relative_start..]);
+        let mut sym_stack: Vec<Var> = Vec::new();
+        let mut block_terminated = false;
+
+        while !reader.at_end() && !block_terminated {
+            let absolute_pc = block_start_pc + reader.position;
+
+            // Stop if we've entered another block's territory
+            if reader.position > 0 && block_map.contains_key(&absolute_pc) {
+                let next_block = block_map[&absolute_pc];
+                builder.jump(next_block);
+                worklist.push_back(absolute_pc);
+                block_terminated = true;
+                break;
             }
-            builder.switch_to(target_block);
-            current_block = target_block;
-            sym_stack.clear();
-            block_terminated = false;
-        }
+
+            // Skip function body ranges
+            if skip_ranges.iter().any(|(start, end)| absolute_pc >= *start && absolute_pc < *end) {
+                if let Some(&(_, end)) = skip_ranges.iter().find(|(s, e)| absolute_pc >= *s && absolute_pc < *e) {
+                    let skip_to = end.saturating_sub(block_start_pc);
+                    reader.position = skip_to;
+                    continue;
+                }
+            }
 
         let Some(opcode_byte) = reader.read_byte() else { break };
         stats.instructions_decoded += 1;
@@ -949,7 +957,7 @@ fn decode_region(
         }
 
         // All other opcodes — same dispatch as decode_plv3
-        dispatch_opcode(
+        let jump_targets = dispatch_opcode(
             opcode_byte,
             source,
             absolute_pc,
@@ -957,15 +965,21 @@ fn decode_region(
             builder,
             &mut sym_stack,
             &mut block_terminated,
-            &block_map,
+            &mut block_map,
             current_block,
             stats,
         );
+
+        // Add jump targets to worklist
+        for target in jump_targets {
+            worklist.push_back(target);
+        }
     }
 
-    // Ensure the last block has a terminator
-    if !block_terminated {
-        builder.halt();
+        // Ensure this block has a terminator
+        if !block_terminated {
+            builder.halt();
+        }
     }
 }
 
@@ -974,6 +988,22 @@ fn decode_region(
 // which helps identify connectivity issues in the decoder.
 
 /// Dispatch a single opcode. Extracted from decode_plv3 for reuse.
+/// Get or create a block at the given absolute PC.
+fn get_or_create_block(
+    abs_pc: usize,
+    block_map: &mut std::collections::HashMap<usize, BlockId>,
+    builder: &mut IrBuilder,
+) -> BlockId {
+    if let Some(&existing) = block_map.get(&abs_pc) {
+        existing
+    } else {
+        let block = builder.create_block(&format!("block_{abs_pc}"));
+        block_map.insert(abs_pc, block);
+        block
+    }
+}
+
+/// Dispatch a single opcode. Returns absolute PCs of jump targets (for worklist).
 #[allow(clippy::too_many_arguments)]
 fn dispatch_opcode(
     opcode_byte: u8,
@@ -983,10 +1013,11 @@ fn dispatch_opcode(
     builder: &mut IrBuilder,
     sym_stack: &mut Vec<Var>,
     block_terminated: &mut bool,
-    block_map: &std::collections::HashMap<usize, BlockId>,
+    block_map: &mut std::collections::HashMap<usize, BlockId>,
     current_block: BlockId,
     stats: &mut DecodeStats,
-) {
+) -> Vec<usize> {
+    let mut jump_targets: Vec<usize> = Vec::new();
     match opcode_byte {
         // ═══ ARITHMETIC ═════════════════════════════════════════
         30  => binary_op(builder, sym_stack, OpCode::Add, source),
@@ -1150,56 +1181,58 @@ fn dispatch_opcode(
         // ═══ CONTROL FLOW ═══════════════════════════════════════
         189 => { // JMP_FWD
             let offset = reader.read_u16_be().unwrap_or(0) as usize;
-            // After reading opcode(1) + u16(2), reader is at absolute_pc + 3
-            let abs_after_operand = absolute_pc + 3;
-            let abs_jmp_target = abs_after_operand + offset;
-            if let Some(&target_block) = block_map.get(&abs_jmp_target) {
-                builder.jump(target_block);
-            }
+            let abs_after = absolute_pc + 3;
+            let target = abs_after + offset;
+            let target_block = get_or_create_block(target, block_map, builder);
+            builder.jump(target_block);
+            jump_targets.push(target);
             stats.jumps += 1; *block_terminated = true;
         }
-        20 => {
+        20 => { // JMP_BACK
             let offset = reader.read_u16_be().unwrap_or(0) as usize;
-            let abs_reader_pos = absolute_pc + 1 + 2;
-            let abs_jmp_target = abs_reader_pos.saturating_sub(offset);
-            if let Some(&target_block) = block_map.get(&abs_jmp_target) {
-                builder.jump(target_block);
-            }
+            let abs_after = absolute_pc + 3;
+            let target = abs_after.saturating_sub(offset);
+            let target_block = get_or_create_block(target, block_map, builder);
+            builder.jump(target_block);
+            jump_targets.push(target);
             stats.jumps += 1; *block_terminated = true;
         }
-        42 => {
+        42 => { // JMP_IF_FALSY
             let offset = reader.read_u16_be().unwrap_or(0) as usize;
-            let abs_reader_pos = absolute_pc + 1 + 2;
-            let abs_false_target = abs_reader_pos + offset;
+            let abs_after = absolute_pc + 3;
+            let false_target = abs_after + offset;
             let cond = stack_pop(sym_stack, builder);
-            if let Some(&false_block) = block_map.get(&abs_false_target) {
-                let true_block = block_map.get(&abs_reader_pos).copied().unwrap_or(current_block);
-                builder.branch_if(cond, true_block, false_block);
-            }
+            let true_block = get_or_create_block(abs_after, block_map, builder);
+            let false_block = get_or_create_block(false_target, block_map, builder);
+            builder.branch_if(cond, true_block, false_block);
+            jump_targets.push(abs_after);
+            jump_targets.push(false_target);
             stats.branches += 1; *block_terminated = true;
         }
-        169 => {
+        169 => { // JMP_FALSY_KEEP
             let offset = reader.read_u16_be().unwrap_or(0) as usize;
-            let abs_reader_pos = absolute_pc + 1 + 2;
-            let abs_target = abs_reader_pos + offset;
-            if let Some(&cond_var) = sym_stack.last()
-                && let Some(&target_block) = block_map.get(&abs_target)
-            {
-                let continue_block = block_map.get(&abs_reader_pos).copied().unwrap_or(current_block);
+            let abs_after = absolute_pc + 3;
+            let target = abs_after + offset;
+            if let Some(&cond_var) = sym_stack.last() {
+                let continue_block = get_or_create_block(abs_after, block_map, builder);
+                let target_block = get_or_create_block(target, block_map, builder);
                 builder.branch_if(cond_var, continue_block, target_block);
             }
+            jump_targets.push(abs_after);
+            jump_targets.push(target);
             stats.branches += 1; *block_terminated = true;
         }
-        89 => {
+        89 => { // JMP_TRUTHY_KEEP
             let offset = reader.read_u16_be().unwrap_or(0) as usize;
-            let abs_reader_pos = absolute_pc + 1 + 2;
-            let abs_target = abs_reader_pos + offset;
-            if let Some(&cond_var) = sym_stack.last()
-                && let Some(&target_block) = block_map.get(&abs_target)
-            {
-                let continue_block = block_map.get(&abs_reader_pos).copied().unwrap_or(current_block);
+            let abs_after = absolute_pc + 3;
+            let target = abs_after + offset;
+            if let Some(&cond_var) = sym_stack.last() {
+                let target_block = get_or_create_block(target, block_map, builder);
+                let continue_block = get_or_create_block(abs_after, block_map, builder);
                 builder.branch_if(cond_var, target_block, continue_block);
             }
+            jump_targets.push(abs_after);
+            jump_targets.push(target);
             stats.branches += 1; *block_terminated = true;
         }
 
@@ -1210,6 +1243,8 @@ fn dispatch_opcode(
 
         _ => { stats.unknown_opcodes += 1; }
     }
+
+    jump_targets
 }
 
 /// Find jump targets within a bytecode region, skipping over function body ranges.

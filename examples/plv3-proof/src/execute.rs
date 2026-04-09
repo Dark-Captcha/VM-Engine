@@ -99,6 +99,16 @@ pub fn extract_keys(module: &Module) -> ExtractedKeys {
     // Limit execution to prevent infinite loops
     interp.set_max_instructions(5_000_000);
 
+    // Enable tracing to see what's happening
+    interp.trace.enable(1000);
+    interp.trace.set_filter(vm_engine_core::exec::trace::TraceFilter {
+        include_steps: false,
+        include_var_writes: false,
+        include_prop_access: false,
+        include_calls: true,
+        ..Default::default()
+    });
+
     // Run
     let completed = match interp.run() {
         Ok(()) => true,
@@ -118,6 +128,19 @@ pub fn extract_keys(module: &Module) -> ExtractedKeys {
     };
 
     let instructions_executed = interp.state.instruction_count;
+
+    // Print call trace
+    let call_events: Vec<_> = interp.trace.events()
+        .filter(|e| matches!(e, vm_engine_core::exec::trace::TraceEvent::CallEnter { .. } | vm_engine_core::exec::trace::TraceEvent::CallReturn { .. }))
+        .collect();
+    if !call_events.is_empty() {
+        eprintln!("[key-extract] call trace ({} events):", call_events.len());
+        for event in call_events.iter().take(20) {
+            eprintln!("  {event:?}");
+        }
+    } else {
+        eprintln!("[key-extract] no call events recorded");
+    }
 
     // Extract keys from captured btoa inputs
     let btoa_inputs = btoa_captures.lock().unwrap();
