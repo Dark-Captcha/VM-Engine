@@ -5,6 +5,7 @@
 mod cipher;
 mod decoder;
 mod extract;
+mod funcmap;
 mod reader;
 
 use vm_engine_core::ir::display::format_module;
