@@ -139,6 +139,20 @@ pub fn reconstruct_block(
     def_blocks: &HashMap<Var, crate::ir::BlockId>,
     var_names: &HashMap<Var, String>,
 ) -> Vec<Stmt> {
+    let (stmts, _) = reconstruct_block_with_expr_map(block, use_counts, def_blocks, var_names);
+    stmts
+}
+
+/// Like [`reconstruct_block`] but also returns the expression map.
+///
+/// The expr map lets callers resolve terminator variables (e.g. BranchIf condition)
+/// to their inlined expressions instead of opaque variable names.
+pub fn reconstruct_block_with_expr_map(
+    block: &Block,
+    use_counts: &HashMap<Var, usize>,
+    def_blocks: &HashMap<Var, crate::ir::BlockId>,
+    var_names: &HashMap<Var, String>,
+) -> (Vec<Stmt>, HashMap<Var, Expr>) {
     let mut expr_map: HashMap<Var, Expr> = HashMap::new();
     let mut stmts = Vec::new();
 
@@ -195,7 +209,22 @@ pub fn reconstruct_block(
         }
     }
 
-    stmts
+    (stmts, expr_map)
+}
+
+/// Resolve a variable to an expression using the expr map, falling back to name.
+pub fn resolve_var_expr(
+    var: crate::ir::Var,
+    expr_map: &HashMap<Var, Expr>,
+    var_names: &HashMap<Var, String>,
+) -> Expr {
+    if let Some(expr) = expr_map.get(&var) {
+        return expr.clone();
+    }
+    let name = var_names.get(&var)
+        .cloned()
+        .unwrap_or_else(|| format!("v{}", var.0));
+    Expr::Var(name)
 }
 
 /// Can this variable be inlined (used once, defined in the same block)?

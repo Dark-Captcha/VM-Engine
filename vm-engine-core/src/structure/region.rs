@@ -90,7 +90,7 @@ pub(crate) fn recover_region(
         }
 
         // Emit this block's instructions as expressions
-        let block_stmts = expr::reconstruct_block(
+        let (block_stmts, block_expr_map) = expr::reconstruct_block_with_expr_map(
             block,
             &ctx.use_counts,
             &ctx.def_blocks,
@@ -104,7 +104,7 @@ pub(crate) fn recover_region(
                 current = Some(*target);
             }
             Terminator::BranchIf { cond, if_true, if_false } => {
-                let cond_expr = ctx.var_expr(*cond);
+                let cond_expr = expr::resolve_var_expr(*cond, &block_expr_map, &ctx.var_names);
                 let merge = ctx.pdom.get(&bid).copied();
 
                 let then_stmts = recover_region(*if_true, merge, ctx, visited);
@@ -121,7 +121,7 @@ pub(crate) fn recover_region(
                 current = merge;
             }
             Terminator::Return { value } => {
-                let expr = value.map(|v| ctx.var_expr(v));
+                let expr = value.map(|v| expr::resolve_var_expr(v, &block_expr_map, &ctx.var_names));
                 stmts.push(Stmt::Return(expr));
                 current = None;
             }
@@ -129,7 +129,7 @@ pub(crate) fn recover_region(
                 current = None;
             }
             Terminator::Throw { value } => {
-                stmts.push(Stmt::Throw(ctx.var_expr(*value)));
+                stmts.push(Stmt::Throw(expr::resolve_var_expr(*value, &block_expr_map, &ctx.var_names)));
                 current = None;
             }
             Terminator::Switch { value, cases, default } => {
@@ -202,7 +202,7 @@ fn recover_while(
     };
 
     // Emit header's instructions (these compute the loop condition)
-    let header_stmts = expr::reconstruct_block(
+    let (header_stmts, header_expr_map) = expr::reconstruct_block_with_expr_map(
         block,
         &ctx.use_counts,
         &ctx.def_blocks,
@@ -211,7 +211,7 @@ fn recover_while(
 
     match &block.terminator {
         Terminator::BranchIf { cond, if_true, if_false } => {
-            let cond_expr = ctx.var_expr(*cond);
+            let cond_expr = expr::resolve_var_expr(*cond, &header_expr_map, &ctx.var_names);
 
             // Determine body vs exit: the branch target inside the loop body is the body
             let (body_target, exit_target, negate_cond) =
