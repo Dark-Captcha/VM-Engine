@@ -1,0 +1,8 @@
+[package]
+name = "plv3-proof"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+vm-engine-core = { path = "../../vm-engine-core" }
+vm-engine-web = { path = "../../vm-engine-web" }

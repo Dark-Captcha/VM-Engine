@@ -3,4 +3,5 @@ resolver = "3"
 members = [
     "vm-engine-core",
     "vm-engine-web",
+    "examples/plv3-proof",
 ]
