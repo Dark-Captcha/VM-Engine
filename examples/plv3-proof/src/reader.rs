@@ -22,6 +22,7 @@ impl<'a> Plv3Reader<'a> {
         self.position >= self.bytecode.len()
     }
 
+    #[allow(dead_code)]
     pub fn remaining(&self) -> usize {
         self.bytecode.len().saturating_sub(self.position)
     }
@@ -168,7 +169,8 @@ mod tests {
         let h_encoded = b'H' ^ 27u8;
         let i_encoded = b'i' ^ 28u8;
         let terminator = 0u8 ^ 29u8;
-        let mut reader = Plv3Reader::new(&[63, h_encoded, i_encoded, terminator]);
+        let bytecode = [63, h_encoded, i_encoded, terminator];
+        let mut reader = Plv3Reader::new(&bytecode);
         let value = reader.read_typed_value().unwrap();
         assert_eq!(value, Value::string("Hi"));
     }

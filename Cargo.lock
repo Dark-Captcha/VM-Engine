@@ -73,6 +73,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vm-engine-disasm"
+version = "0.1.0"
+dependencies = [
+ "vm-engine-core",
+]
+
+[[package]]
 name = "vm-engine-web"
 version = "0.1.0"
 dependencies = [

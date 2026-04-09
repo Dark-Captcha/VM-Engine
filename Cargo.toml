@@ -3,5 +3,6 @@ resolver = "3"
 members = [
     "vm-engine-core",
     "vm-engine-web",
+    "vm-engine-disasm",
     "examples/plv3-proof",
 ]

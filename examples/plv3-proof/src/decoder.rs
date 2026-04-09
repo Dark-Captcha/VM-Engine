@@ -667,12 +667,11 @@ pub fn decode_plv3(bytecode: &[u8]) -> (Module, DecodeStats) {
                 // This is JS || short-circuit
                 let offset = reader.read_u16_be().unwrap_or(0) as usize;
                 let target_pc = reader.position + offset;
-                if let Some(&cond_var) = sym_stack.last() {
-                    if let Some(&target_block) = block_map.get(&target_pc) {
-                        let continue_block = block_map.get(&reader.position).copied().unwrap_or(current_block);
-                        // Branch: if truthy → pop and continue; if falsy → keep and jump
-                        builder.branch_if(cond_var, continue_block, target_block);
-                    }
+                if let Some(&cond_var) = sym_stack.last()
+                    && let Some(&target_block) = block_map.get(&target_pc)
+                {
+                    let continue_block = block_map.get(&reader.position).copied().unwrap_or(current_block);
+                    builder.branch_if(cond_var, continue_block, target_block);
                 }
                 stats.branches += 1; block_terminated = true;
             }
@@ -680,12 +679,11 @@ pub fn decode_plv3(bytecode: &[u8]) -> (Module, DecodeStats) {
                 // This is JS && short-circuit
                 let offset = reader.read_u16_be().unwrap_or(0) as usize;
                 let target_pc = reader.position + offset;
-                if let Some(&cond_var) = sym_stack.last() {
-                    if let Some(&target_block) = block_map.get(&target_pc) {
-                        let continue_block = block_map.get(&reader.position).copied().unwrap_or(current_block);
-                        // Branch: if truthy → keep and jump; if falsy → pop and continue
-                        builder.branch_if(cond_var, target_block, continue_block);
-                    }
+                if let Some(&cond_var) = sym_stack.last()
+                    && let Some(&target_block) = block_map.get(&target_pc)
+                {
+                    let continue_block = block_map.get(&reader.position).copied().unwrap_or(current_block);
+                    builder.branch_if(cond_var, target_block, continue_block);
                 }
                 stats.branches += 1; block_terminated = true;
             }
