@@ -3,6 +3,7 @@
 //! Run: cargo run -p plv3-proof
 
 mod decoder;
+mod extract;
 mod reader;
 
 use vm_engine_core::ir::display::format_module;
@@ -40,6 +41,43 @@ fn main() {
     match validate::validate(&module) {
         Ok(()) => println!("  [ok] IR is well-formed"),
         Err(err) => println!("  [warn] {err}"),
+    }
+
+    // S-box extraction
+    println!("\n=== S-box Extraction ===");
+    let sbox_result = extract::extract_sboxes(&module);
+    println!("  total arrays found:     {}", sbox_result.total_arrays);
+    println!("  partial (non-256):      {}", sbox_result.partial_arrays);
+    println!("  complete S-boxes (256): {}", sbox_result.sboxes.len());
+    for sbox in &sbox_result.sboxes {
+        println!(
+            "  sbox{}: block={}, var={}, first_8=[{}, {}, {}, {}, {}, {}, {}, {}]",
+            sbox.index, sbox.source_block, sbox.array_var,
+            sbox.bytes[0], sbox.bytes[1], sbox.bytes[2], sbox.bytes[3],
+            sbox.bytes[4], sbox.bytes[5], sbox.bytes[6], sbox.bytes[7],
+        );
+    }
+
+    // Verify against known reference if available
+    // Use reference from the SAME bytecode rotation (plv3-vm/out/, not datadome_new/data/)
+    let reference_path = "/home/gnusocute/Documents/Dark-Captcha_old/datadome/plv3-vm/out/sbox.json";
+    if let Ok(reference_json) = std::fs::read_to_string(reference_path) {
+        if let Ok(reference_map) = serde_json::from_str::<std::collections::HashMap<String, Vec<u8>>>(&reference_json) {
+            let mut reference_ordered: Vec<Vec<u8>> = Vec::new();
+            for index in 0..reference_map.len() {
+                let key = format!("sbox{index}");
+                if let Some(bytes) = reference_map.get(&key) {
+                    reference_ordered.push(bytes.clone());
+                }
+            }
+            let (matched, mismatched) = extract::verify_sboxes(&sbox_result.sboxes, &reference_ordered);
+            println!("\n  Verification against {reference_path}:");
+            println!("    reference S-boxes: {}", reference_ordered.len());
+            println!("    matched:           {matched}");
+            if !mismatched.is_empty() {
+                println!("    mismatched:        {mismatched:?}");
+            }
+        }
     }
 
     // Print first 50 lines of IR

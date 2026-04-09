@@ -270,14 +270,15 @@ pub fn decode_plv3(bytecode: &[u8]) -> (Module, DecodeStats) {
                 for _ in 0..count.min(sym_stack.len()) { sym_stack.pop(); }
             }
 
-            // ═══ COLLECT (pop N → array) ════════════════════════
+            // ═══ COLLECT (pop N → reversed array) ═══════════════
             191 => {
                 let count = reader.read_u16_be().unwrap_or(0) as usize;
                 let array_var = builder.emit_sourced(OpCode::NewArray, vec![], source);
                 let to_drain = count.min(sym_stack.len());
                 let start = sym_stack.len() - to_drain;
+                // COLLECT reverses the popped items (per VM spec: "pop N → reversed array")
                 for index in 0..to_drain {
-                    let elem = sym_stack[start + index];
+                    let elem = sym_stack[start + (to_drain - 1 - index)];
                     let idx_var = builder.const_number(index as f64);
                     builder.store_index(array_var, idx_var, elem);
                 }

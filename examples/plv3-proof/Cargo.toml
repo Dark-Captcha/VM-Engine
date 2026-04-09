@@ -7,3 +7,4 @@ edition = "2024"
 vm-engine-core = { path = "../../crates/vm-engine-core" }
 vm-engine-web = { path = "../../crates/vm-engine-web" }
 vm-engine-disasm = { path = "../../crates/vm-engine-disasm" }
+serde_json = "1"
