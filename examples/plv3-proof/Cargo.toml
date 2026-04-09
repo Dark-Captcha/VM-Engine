@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-vm-engine-core = { path = "../../vm-engine-core" }
-vm-engine-web = { path = "../../vm-engine-web" }
+vm-engine-core = { path = "../../crates/vm-engine-core" }
+vm-engine-web = { path = "../../crates/vm-engine-web" }
+vm-engine-disasm = { path = "../../crates/vm-engine-disasm" }

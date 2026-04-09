@@ -7,6 +7,7 @@ name = "plv3-proof"
 version = "0.1.0"
 dependencies = [
  "vm-engine-core",
+ "vm-engine-disasm",
  "vm-engine-web",
 ]
 
