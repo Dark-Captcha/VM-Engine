@@ -55,26 +55,13 @@ use vm_engine_core::value::ObjectId;
 // ============================================================================
 
 /// Combined configuration for the full browser environment.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct WebConfig {
     pub navigator: NavigatorConfig,
     pub screen: ScreenConfig,
     pub timing: TimingConfig,
     pub random: RandomConfig,
     pub document: DocumentConfig,
-}
-
-impl Default for WebConfig {
-    #[allow(clippy::derivable_impls)]
-    fn default() -> Self {
-        Self {
-            navigator: NavigatorConfig::default(),
-            screen: ScreenConfig::default(),
-            timing: TimingConfig::default(),
-            random: RandomConfig::default(),
-            document: DocumentConfig::default(),
-        }
-    }
 }
 
 // ============================================================================

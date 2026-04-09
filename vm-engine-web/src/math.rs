@@ -221,4 +221,62 @@ mod tests {
             Value::number(-5.0), // wrapping multiplication
         );
     }
+
+    #[test]
+    fn math_pow() {
+        let mut heap = Heap::new();
+        let global = heap.alloc();
+        install_math(&mut heap, global);
+
+        assert_eq!(call_math(&mut heap, global, "pow", &[Value::number(2.0), Value::number(10.0)]), Value::number(1024.0));
+    }
+
+    #[test]
+    fn math_trig() {
+        let mut heap = Heap::new();
+        let global = heap.alloc();
+        install_math(&mut heap, global);
+
+        let sin_0 = call_math(&mut heap, global, "sin", &[Value::number(0.0)]).as_number().unwrap();
+        assert!((sin_0 - 0.0).abs() < 1e-15);
+
+        let cos_0 = call_math(&mut heap, global, "cos", &[Value::number(0.0)]).as_number().unwrap();
+        assert!((cos_0 - 1.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn math_log_exp() {
+        let mut heap = Heap::new();
+        let global = heap.alloc();
+        install_math(&mut heap, global);
+
+        let log_e = call_math(&mut heap, global, "log", &[Value::number(std::f64::consts::E)]).as_number().unwrap();
+        assert!((log_e - 1.0).abs() < 1e-15);
+
+        let exp_1 = call_math(&mut heap, global, "exp", &[Value::number(1.0)]).as_number().unwrap();
+        assert!((exp_1 - std::f64::consts::E).abs() < 1e-15);
+    }
+
+    #[test]
+    fn math_sqrt_cbrt() {
+        let mut heap = Heap::new();
+        let global = heap.alloc();
+        install_math(&mut heap, global);
+
+        assert_eq!(call_math(&mut heap, global, "sqrt", &[Value::number(144.0)]), Value::number(12.0));
+        let cbrt_27 = call_math(&mut heap, global, "cbrt", &[Value::number(27.0)]).as_number().unwrap();
+        assert!((cbrt_27 - 3.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn math_sign_trunc() {
+        let mut heap = Heap::new();
+        let global = heap.alloc();
+        install_math(&mut heap, global);
+
+        assert_eq!(call_math(&mut heap, global, "sign", &[Value::number(-42.0)]), Value::number(-1.0));
+        assert_eq!(call_math(&mut heap, global, "sign", &[Value::number(42.0)]), Value::number(1.0));
+        assert_eq!(call_math(&mut heap, global, "trunc", &[Value::number(3.9)]), Value::number(3.0));
+        assert_eq!(call_math(&mut heap, global, "trunc", &[Value::number(-3.9)]), Value::number(-3.0));
+    }
 }

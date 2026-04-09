@@ -190,4 +190,29 @@ mod tests {
         let decoded = percent_decode(&encoded);
         assert_eq!(decoded, "hello world/path?q=1");
     }
+
+    #[test]
+    fn atob_invalid_returns_undefined() {
+        let mut heap = Heap::new();
+        let global = heap.alloc();
+        install_encoding(&mut heap, global);
+
+        let atob_id = heap.get_property(global, "atob").as_object().unwrap();
+        // Odd-length string can't be valid base64
+        let result = heap.call(atob_id, &[Value::string("abc")]).unwrap();
+        assert_eq!(result, Value::Undefined);
+    }
+
+    #[test]
+    fn btoa_non_string_input() {
+        let mut heap = Heap::new();
+        let global = heap.alloc();
+        install_encoding(&mut heap, global);
+
+        let btoa_id = heap.get_property(global, "btoa").as_object().unwrap();
+        // Number coerces to string "42" then encodes
+        let result = heap.call(btoa_id, &[Value::number(42.0)]).unwrap();
+        assert!(result.as_str().is_some());
+        assert_eq!(result, Value::string(base64_encode(b"42")));
+    }
 }

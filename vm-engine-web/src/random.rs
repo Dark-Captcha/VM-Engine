@@ -178,6 +178,32 @@ mod tests {
     }
 
     #[test]
+    fn crypto_get_random_values_fills_object() {
+        let mut heap = Heap::new();
+        let global = heap.alloc();
+        install_random(&mut heap, global, &RandomConfig::default());
+
+        // Create an object with "length" property to simulate typed array
+        let array_obj = heap.alloc();
+        heap.set_property(array_obj, "length", Value::number(4.0));
+
+        let crypto = heap.get_property(global, "crypto").as_object().unwrap();
+        let get_rv = heap.get_property(crypto, "getRandomValues").as_object().unwrap();
+        let result = heap.call(get_rv, &[Value::Object(array_obj)]).unwrap();
+
+        // Should return the same object
+        assert_eq!(result.as_object(), Some(array_obj));
+
+        // Should have filled numeric indices 0-3
+        for index in 0..4 {
+            let value = heap.get_property(array_obj, &index.to_string());
+            assert!(value.as_number().is_some(), "index {index} should be filled");
+            let byte = value.as_number().unwrap();
+            assert!(byte >= 0.0 && byte <= 255.0, "byte should be 0-255, got {byte}");
+        }
+    }
+
+    #[test]
     fn random_uuid_is_deterministic() {
         let mut heap = Heap::new();
         let global = heap.alloc();

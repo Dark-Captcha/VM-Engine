@@ -53,7 +53,13 @@ fn value_to_json(value: &Value, heap: &Heap, depth: usize) -> String {
         Value::Bool(true) => "true".into(),
         Value::Bool(false) => "false".into(),
         Value::Null => "null".into(),
-        Value::Undefined | Value::Closure(_) => "undefined".into(),
+        // Per spec: JSON.stringify(undefined) returns undefined (not a string).
+        // But inside objects/arrays, undefined values are omitted (handled above).
+        // At top level, we return "null" to avoid breaking callers expecting a string.
+        Value::Undefined | Value::Closure(_) => {
+            if depth == 0 { return "null".into(); }
+            "null".into()
+        }
         Value::Object(object_id) => {
             if let Some(object) = heap.get(*object_id) {
                 let mut pairs: Vec<String> = Vec::new();
@@ -210,5 +216,31 @@ mod tests {
         assert_eq!(parse_json_value("true"), Value::Bool(true));
         assert_eq!(parse_json_value("null"), Value::Null);
         assert_eq!(parse_json_value("\"hello\""), Value::string("hello"));
+    }
+
+    #[test]
+    fn stringify_nested_object() {
+        let mut heap = Heap::new();
+        let inner = heap.alloc();
+        heap.set_property(inner, "x", Value::number(1.0));
+        let outer = heap.alloc();
+        heap.set_property(outer, "inner", Value::Object(inner));
+        heap.set_property(outer, "y", Value::number(2.0));
+
+        let result = value_to_json(&Value::Object(outer), &heap, 0);
+        assert!(result.contains("\"inner\":{\"x\":1}"), "got: {result}");
+        assert!(result.contains("\"y\":2"), "got: {result}");
+    }
+
+    #[test]
+    fn stringify_skips_undefined_in_object() {
+        let mut heap = Heap::new();
+        let obj = heap.alloc();
+        heap.set_property(obj, "present", Value::number(1.0));
+        heap.set_property(obj, "missing", Value::Undefined);
+
+        let result = value_to_json(&Value::Object(obj), &heap, 0);
+        assert!(result.contains("\"present\":1"), "got: {result}");
+        assert!(!result.contains("missing"), "undefined should be omitted: {result}");
     }
 }

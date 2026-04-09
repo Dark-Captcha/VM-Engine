@@ -85,13 +85,11 @@ pub fn install_document(heap: &mut Heap, global: ObjectId, config: &DocumentConf
 
     heap.set_property(global, "document", Value::Object(document));
 
-    // Also expose location directly on global (common pattern)
+    // Also expose location directly on global (common JS pattern)
     heap.set_property(global, "location", Value::Object(location));
 
-    // window.isSecureContext
+    // Window-level properties derived from document config
     heap.set_property(global, "isSecureContext", Value::bool(config.is_secure_context));
-
-    // window.innerWidth / innerHeight
     heap.set_property(global, "innerWidth", Value::number(config.client_width as f64));
     heap.set_property(global, "innerHeight", Value::number(config.client_height as f64));
 }
