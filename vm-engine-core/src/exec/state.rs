@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::ir::{BlockId, FuncId, Var};
-use crate::value::Value;
+use crate::value::{ObjectId, Value};
 
 use super::heap::Heap;
 use super::scope::ScopeChain;
@@ -68,6 +68,8 @@ pub struct State {
     pub cursor: Cursor,
     /// The block we came from (for Phi node resolution).
     pub previous_block: Option<BlockId>,
+    /// The global object — `LoadScope` falls back here when scope lookup fails.
+    pub global_object: Option<ObjectId>,
     /// Whether execution has stopped.
     pub halted: bool,
     /// Total instructions executed.
@@ -88,6 +90,7 @@ impl State {
                 instruction: 0,
             },
             previous_block: None,
+            global_object: None,
             halted: false,
             instruction_count: 0,
         }

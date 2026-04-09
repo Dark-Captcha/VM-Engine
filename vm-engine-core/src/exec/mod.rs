@@ -333,12 +333,26 @@ impl<'m, H: Hook> Interpreter<'m, H> {
             }
             OpCode::LoadScope => {
                 let name = coerce::to_string(&operand_value(0));
-                Ok(Some(self.state.scopes.get(&name).unwrap_or(Value::Undefined)))
+                // Try scope chain first, fall back to global object properties.
+                if let Some(val) = self.state.scopes.get(&name) {
+                    Ok(Some(val))
+                } else if let Some(global) = self.state.global_object {
+                    Ok(Some(self.state.heap.get_property(global, &name)))
+                } else {
+                    Ok(Some(Value::Undefined))
+                }
             }
             OpCode::StoreScope => {
                 let name = coerce::to_string(&operand_value(0));
                 let val = operand_value(1);
-                self.state.scopes.set_existing(&name, val);
+                // Write to scope if variable exists there, otherwise write to global.
+                if self.state.scopes.get(&name).is_some() {
+                    self.state.scopes.set_existing(&name, val);
+                } else if let Some(global) = self.state.global_object {
+                    self.state.heap.set_property(global, &name, val);
+                } else {
+                    self.state.scopes.set(&name, val);
+                }
                 Ok(None)
             }
             OpCode::NewObject => {

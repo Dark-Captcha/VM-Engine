@@ -2,4 +2,5 @@
 resolver = "3"
 members = [
     "vm-engine-core",
+    "vm-engine-web",
 ]
