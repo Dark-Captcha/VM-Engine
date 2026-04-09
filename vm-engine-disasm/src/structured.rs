@@ -75,6 +75,45 @@ mod tests {
     }
 
     #[test]
+    fn structured_output_inlines_expressions() {
+        let mut builder = IrBuilder::new();
+        builder.begin_function("expr_test");
+        builder.create_and_switch("entry");
+        let left = builder.const_number(10.0);
+        let right = builder.const_number(20.0);
+        let sum = builder.add(left, right);
+        builder.ret(Some(sum));
+        builder.end_function();
+
+        let module = builder.build();
+        let text = format_structured(&module);
+
+        // Constants inline into the add, then simplifier folds 10+20 → 30
+        assert!(text.contains("30") || text.contains("10 + 20"),
+            "should inline and fold expressions:\n{text}");
+    }
+
+    #[test]
+    fn structured_output_multiple_functions() {
+        let mut builder = IrBuilder::new();
+        builder.begin_function("first");
+        builder.create_and_switch("entry");
+        builder.halt();
+        builder.end_function();
+
+        builder.begin_function("second");
+        builder.create_and_switch("entry");
+        builder.halt();
+        builder.end_function();
+
+        let module = builder.build();
+        let text = format_structured(&module);
+
+        assert!(text.contains("function first()"), "should have first:\n{text}");
+        assert!(text.contains("function second()"), "should have second:\n{text}");
+    }
+
+    #[test]
     fn structured_output_shows_if_else() {
         let mut builder = IrBuilder::new();
         builder.begin_function("check");

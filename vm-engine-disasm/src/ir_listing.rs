@@ -53,9 +53,9 @@ fn format_block_ir(output: &mut String, block: &Block) {
         format_instruction_ir(output, instruction);
     }
 
-    // Terminator
+    // Terminator (no source PC — always from IR structure, not bytecode)
     let terminator_text = format!("{}", block.terminator);
-    writeln!(output, "  {:>8} |     {terminator_text}", "").unwrap();
+    writeln!(output, "         |     {terminator_text}").unwrap();
 }
 
 /// Format one instruction with source PC in the left margin.
@@ -112,6 +112,44 @@ mod tests {
 
         assert!(listing.contains("100"), "should show source PC:\n{listing}");
         assert!(listing.contains("const 42"), "should show instruction:\n{listing}");
+    }
+
+    #[test]
+    fn ir_listing_with_params() {
+        let mut builder = IrBuilder::new();
+        builder.begin_function("add_one");
+        let param = builder.add_param();
+        builder.create_and_switch("entry");
+        let one = builder.const_number(1.0);
+        let _ = builder.add(param, one);
+        builder.halt();
+        builder.end_function();
+
+        let module = builder.build();
+        let listing = format_ir_listing(&module);
+
+        assert!(listing.contains("function add_one(%0):"), "should show param:\n{listing}");
+        assert!(listing.contains("add %0"), "should reference param in add:\n{listing}");
+    }
+
+    #[test]
+    fn ir_listing_void_instruction() {
+        let mut builder = IrBuilder::new();
+        builder.begin_function("setter");
+        builder.create_and_switch("entry");
+        let obj = builder.new_object();
+        let key = builder.const_string("x");
+        let val = builder.const_number(42.0);
+        builder.store_prop(obj, key, val);
+        builder.halt();
+        builder.end_function();
+
+        let module = builder.build();
+        let listing = format_ir_listing(&module);
+
+        // store_prop has no result, so no "%N = " prefix
+        assert!(listing.contains("store_prop"), "should show void op:\n{listing}");
+        assert!(!listing.contains("= store_prop"), "void op should have no result:\n{listing}");
     }
 
     #[test]

@@ -168,6 +168,31 @@ mod tests {
     }
 
     #[test]
+    fn cfg_dot_with_loop_shows_back_edge() {
+        let mut builder = IrBuilder::new();
+        builder.begin_function("loop");
+        let header = builder.create_and_switch("header");
+        let cond = builder.const_bool(true);
+        let body = builder.create_block("body");
+        let exit = builder.create_block("exit");
+        builder.switch_to(header);
+        builder.branch_if(cond, body, exit);
+        builder.switch_to(body);
+        builder.jump(header); // back edge
+        builder.switch_to(exit);
+        builder.halt();
+        builder.end_function();
+
+        let module = builder.build();
+        let function = &module.functions[0];
+        let cfg = graph::build_cfg(function);
+        let dot = cfg_to_dot(function, &cfg);
+
+        // Should have edge from body → header (back edge, blue jump)
+        assert!(dot.contains("B1 -> B0"), "should have back edge:\n{dot}");
+    }
+
+    #[test]
     fn callgraph_dot_has_functions() {
         let mut builder = IrBuilder::new();
 
