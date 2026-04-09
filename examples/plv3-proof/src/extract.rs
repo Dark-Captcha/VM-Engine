@@ -116,9 +116,9 @@ pub fn extract_sboxes(module: &Module) -> SboxExtraction {
                     // All 256 entries are constant — this is an S-box
                     let mut bytes = vec![0u8; 256];
                     let mut complete = true;
-                    for index in 0..256 {
+                    for (index, slot) in bytes.iter_mut().enumerate() {
                         if let Some(&byte) = entries.get(&index) {
-                            bytes[index] = byte;
+                            *slot = byte;
                         } else {
                             complete = false;
                             break;
@@ -181,15 +181,12 @@ fn build_const_map(
 
     for block in &function.blocks {
         for instruction in &block.body {
-            if instruction.op == OpCode::Const {
-                if let (Some(var), Some(Operand::Const(value))) =
+            if instruction.op == OpCode::Const
+                && let (Some(var), Some(Operand::Const(value))) =
                     (instruction.result, instruction.operands.first())
-                {
-                    if let Some(number) = value.as_number() {
+                    && let Some(number) = value.as_number() {
                         constants.insert(var, number);
                     }
-                }
-            }
         }
     }
 

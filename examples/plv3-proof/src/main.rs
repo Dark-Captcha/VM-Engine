@@ -2,6 +2,7 @@
 //!
 //! Run: cargo run -p plv3-proof
 
+mod cipher;
 mod decoder;
 mod extract;
 mod reader;
@@ -61,8 +62,8 @@ fn main() {
     // Verify against known reference if available
     // Use reference from the SAME bytecode rotation (plv3-vm/out/, not datadome_new/data/)
     let reference_path = "/home/gnusocute/Documents/Dark-Captcha_old/datadome/plv3-vm/out/sbox.json";
-    if let Ok(reference_json) = std::fs::read_to_string(reference_path) {
-        if let Ok(reference_map) = serde_json::from_str::<std::collections::HashMap<String, Vec<u8>>>(&reference_json) {
+    if let Ok(reference_json) = std::fs::read_to_string(reference_path)
+        && let Ok(reference_map) = serde_json::from_str::<std::collections::HashMap<String, Vec<u8>>>(&reference_json) {
             let mut reference_ordered: Vec<Vec<u8>> = Vec::new();
             for index in 0..reference_map.len() {
                 let key = format!("sbox{index}");
@@ -78,6 +79,46 @@ fn main() {
                 println!("    mismatched:        {mismatched:?}");
             }
         }
+
+    // ═══ PLV3 Token Generation ═══════════════════════════════════════
+    if sbox_result.sboxes.len() >= 25 {
+        println!("\n=== PLV3 Token Generation ===");
+
+        let sbox0 = cipher::to_sbox_array(&sbox_result.sboxes[0].bytes);
+        let cipher_sboxes = cipher::CipherSboxes {
+            sbox4: cipher::to_sbox_array(&sbox_result.sboxes[4].bytes),
+            sbox5: cipher::to_sbox_array(&sbox_result.sboxes[5].bytes),
+            sbox6: cipher::to_sbox_array(&sbox_result.sboxes[6].bytes),
+            sbox7: cipher::to_sbox_array(&sbox_result.sboxes[7].bytes),
+            sbox9: cipher::to_sbox_array(&sbox_result.sboxes[9].bytes),
+            sbox10: cipher::to_sbox_array(&sbox_result.sboxes[10].bytes),
+            sbox11: cipher::to_sbox_array(&sbox_result.sboxes[11].bytes),
+            sbox15: cipher::to_sbox_array(&sbox_result.sboxes[15].bytes),
+            sbox16: cipher::to_sbox_array(&sbox_result.sboxes[16].bytes),
+            sbox22: cipher::to_sbox_array(&sbox_result.sboxes[22].bytes),
+            sbox24: cipher::to_sbox_array(&sbox_result.sboxes[24].bytes),
+        };
+
+        // Keys: still need automated extraction. Using known keys for this bytecode rotation.
+        // TODO: extract keys from IR via interpreter execution or static analysis.
+        let keys = cipher::Plv3Keys {
+            timestamp: "o4zbWU".into(),
+            pathname: "P6qv3g".into(),
+            client_width: "IMd3AC".into(),
+            elapsed: "yKUvF2".into(),
+            perf_now: "mR8kKc".into(),
+            is_secure: "oezAbp".into(),
+            webdriver: "J1nt2L".into(),
+            random: "KJg3g6".into(),
+        };
+
+        let token = cipher::generate_plv3_token(&sbox0, &cipher_sboxes, &keys, "/interstitial/");
+        println!("  token length: {}", token.len());
+        println!("  token: {}", &token[..token.len().min(80)]);
+        if token.len() > 80 { println!("         ...{}", &token[token.len()-20..]); }
+        println!("  base64url safe: {}", token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    } else {
+        println!("\n[skip] Not enough S-boxes for token generation (need 25+, got {})", sbox_result.sboxes.len());
     }
 
     // Print first 50 lines of IR
