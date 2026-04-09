@@ -58,6 +58,11 @@ pub fn install_encoding(heap: &mut Heap, global: ObjectId) {
 
 const BASE64_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+/// Encode bytes as standard base64.
+pub fn base64_encode_raw(input: &[u8]) -> String {
+    base64_encode(input)
+}
+
 fn base64_encode(input: &[u8]) -> String {
     let mut output = String::new();
     let mut index = 0;

@@ -4,6 +4,7 @@
 
 mod cipher;
 mod decoder;
+mod execute;
 mod extract;
 mod funcmap;
 mod reader;
@@ -20,8 +21,8 @@ fn main() {
     let bytecode = std::fs::read(BYTECODE_PATH).expect("failed to read bytecode.bin");
     println!("Loaded {} bytes of PLV3 bytecode\n", bytecode.len());
 
-    // Decode
-    let (module, stats) = decoder::decode_plv3(&bytecode);
+    // Decode (multi-function: each MAKE_FUNC body is a separate IR function)
+    let (module, stats) = decoder::decode_plv3_multifunc(&bytecode);
     println!("=== Decode Stats ===");
     println!("  instructions decoded: {}", stats.instructions_decoded);
     println!("  unknown opcodes:      {}", stats.unknown_opcodes);
@@ -120,6 +121,26 @@ fn main() {
         println!("  base64url safe: {}", token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
     } else {
         println!("\n[skip] Not enough S-boxes for token generation (need 25+, got {})", sbox_result.sboxes.len());
+    }
+
+    // ═══ Key Extraction via Interpreter ════════════════════════════
+    println!("\n=== Key Extraction (interpreter + zeroed S-boxes) ===");
+    let key_result = execute::extract_keys(&module);
+    println!("  instructions executed: {}", key_result.instructions_executed);
+    println!("  completed:             {}", key_result.completed);
+    if let Some(btoa_input) = &key_result.btoa_input {
+        println!("  btoa input length:     {}", btoa_input.len());
+        println!("  btoa input preview:    {}", &btoa_input[..btoa_input.len().min(100)]);
+    }
+    if !key_result.keys.is_empty() {
+        println!("  extracted keys ({}):", key_result.keys.len());
+        let field_names = ["timestamp", "pathname", "clientWidth", "elapsed", "perf_now", "is_secure", "webdriver", "random"];
+        for (index, key) in key_result.keys.iter().enumerate() {
+            let field = field_names.get(index).unwrap_or(&"?");
+            println!("    {field:>15} → \"{key}\"");
+        }
+    } else {
+        println!("  [no keys extracted — interpreter may not have reached btoa]");
     }
 
     // Print first 50 lines of IR

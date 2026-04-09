@@ -383,38 +383,41 @@ impl<'m, H: Hook> Interpreter<'m, H> {
                         return Ok(Some(result));
                     }
 
-                // IR function call — handled by pushing call frame
-                if let Some(fid) = func_ref
-                    && let Some(target) = self.module.function_by_id(fid) {
-                        self.trace.record(TraceEvent::CallEnter {
-                            func: fid,
-                            arg_count: args.len(),
-                        });
+                // IR function call by FuncId or by name (for indirect calls via Var)
+                let resolved_target = if let Some(fid) = func_ref {
+                    self.module.function_by_id(fid)
+                } else if let Value::String(name) = &operand_value(0) {
+                    self.module.function_by_name(name)
+                } else {
+                    None
+                };
+                if let Some(target) = resolved_target {
+                    let fid = target.id;
+                    self.trace.record(TraceEvent::CallEnter {
+                        func: fid,
+                        arg_count: args.len(),
+                    });
 
-                        // Save current state
-                        let mut return_cursor = self.state.cursor;
-                        return_cursor.instruction += 1; // resume after call
-                        self.state.call_stack.push(CallFrame {
-                            return_cursor,
-                            scope_depth: self.state.scopes.len(),
-                            locals: std::collections::HashMap::new(),
-                        });
+                    let mut return_cursor = self.state.cursor;
+                    return_cursor.instruction += 1;
+                    self.state.call_stack.push(CallFrame {
+                        return_cursor,
+                        scope_depth: self.state.scopes.len(),
+                        locals: std::collections::HashMap::new(),
+                    });
 
-                        // Bind params
-                        for (i, &param_var) in target.params.iter().enumerate() {
-                            let arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
-                            self.state.set_var(param_var, arg_val);
-                        }
-
-                        // Jump to function entry
-                        self.state.cursor = Cursor {
-                            function: fid,
-                            block: target.entry,
-                            instruction: 0,
-                        };
-                        // Return None — the call result will come from Return terminator
-                        return Ok(None);
+                    for (i, &param_var) in target.params.iter().enumerate() {
+                        let arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
+                        self.state.set_var(param_var, arg_val);
                     }
+
+                    self.state.cursor = Cursor {
+                        function: fid,
+                        block: target.entry,
+                        instruction: 0,
+                    };
+                    return Ok(None);
+                }
 
                 Ok(Some(Value::Undefined))
             }
@@ -517,7 +520,10 @@ impl<'m, H: Hook> Interpreter<'m, H> {
                 Err(Error::exec(format!("uncaught throw: {val}")))
             }
             Terminator::Unreachable => {
-                Err(Error::exec("reached unreachable block"))
+                Err(Error::exec(format!(
+                    "reached unreachable block at cursor {}",
+                    self.state.cursor
+                )))
             }
         }
     }

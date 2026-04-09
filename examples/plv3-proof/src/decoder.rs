@@ -795,6 +795,485 @@ fn store_frame(builder: &mut IrBuilder, frame_addr: u16, value: Var) {
     ]);
 }
 
+// ============================================================================
+// Multi-function decoder
+// ============================================================================
+
+use crate::funcmap::{FuncMap, find_func_ranges};
+
+/// Decode PLV3 bytecode into a multi-function IR Module.
+///
+/// Each MAKE_FUNC body becomes a separate IR function.
+/// The main code references them by name for indirect calls.
+pub fn decode_plv3_multifunc(bytecode: &[u8]) -> (Module, DecodeStats) {
+    let func_map = find_func_ranges(bytecode);
+    let mut builder = IrBuilder::new();
+    let mut stats = DecodeStats::default();
+
+    // Phase 1: Decode each function body as a separate IR function.
+    // Function names are "func_{entry_pc}" so the interpreter can find them.
+    let mut func_names: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+
+    for func_range in &func_map.functions {
+        let name = format!("func_{}", func_range.body_start);
+        func_names.insert(func_range.make_func_pc, name.clone());
+
+        let func_bytecode = &bytecode[func_range.body_start..func_range.body_end];
+        let func_id = builder.begin_function(&name);
+
+        // Add params
+        for _ in 0..func_range.param_count {
+            builder.add_param();
+        }
+
+        decode_region(
+            func_bytecode,
+            func_range.body_start,
+            &mut builder,
+            &mut stats,
+            &func_names,
+            &[], // no skip ranges inside function bodies
+        );
+
+        builder.end_function();
+    }
+
+    // Phase 2: Decode the main code (skips over function bodies via JMP_FWD).
+    // Collect function body ranges so block scanner skips them.
+    let skip_ranges: Vec<(usize, usize)> = func_map.functions.iter()
+        .map(|f| (f.body_start, f.body_end))
+        .collect();
+
+    builder.begin_function("main");
+    decode_region(
+        bytecode,
+        0,
+        &mut builder,
+        &mut stats,
+        &func_names,
+        &skip_ranges,
+    );
+    builder.end_function();
+
+    (builder.build(), stats)
+}
+
+/// Decode a bytecode region into the current IR function.
+///
+/// `base_pc` is added to reader positions to get absolute PCs (for source locations
+/// and jump target resolution).
+fn decode_region(
+    region_bytecode: &[u8],
+    base_pc: usize,
+    builder: &mut IrBuilder,
+    stats: &mut DecodeStats,
+    func_names: &std::collections::HashMap<usize, String>,
+    skip_ranges: &[(usize, usize)],
+) {
+    let mut reader = Plv3Reader::new(region_bytecode);
+    let mut sym_stack: Vec<Var> = Vec::new();
+
+    // Find block starts within this region, skipping function body ranges.
+    // Both the scanner and the targets are filtered to exclude function bodies.
+    let mut block_starts = find_block_starts_in_region_skipping(region_bytecode, base_pc, skip_ranges);
+
+    let entry_block = builder.create_and_switch(&format!("entry_{base_pc}"));
+    let mut current_block = entry_block;
+    let mut block_map: std::collections::HashMap<usize, BlockId> = std::collections::HashMap::new();
+    block_map.insert(base_pc, entry_block);
+
+    for &target_pc in &block_starts {
+        if target_pc != base_pc && !block_map.contains_key(&target_pc) {
+            let block = builder.create_block(&format!("block_{target_pc}"));
+            block_map.insert(target_pc, block);
+        }
+    }
+
+    let mut block_terminated = false;
+
+    while !reader.at_end() {
+        let relative_pc = reader.position;
+        let absolute_pc = base_pc + relative_pc;
+
+        let needs_new_block = (relative_pc > 0 && block_map.contains_key(&absolute_pc))
+            || block_terminated;
+
+        if needs_new_block {
+            let target_block = if let Some(&existing) = block_map.get(&absolute_pc) {
+                existing
+            } else {
+                let new_block = builder.create_block(&format!("block_{absolute_pc}"));
+                block_map.insert(absolute_pc, new_block);
+                new_block
+            };
+            if !block_terminated {
+                builder.jump(target_block);
+            }
+            builder.switch_to(target_block);
+            current_block = target_block;
+            sym_stack.clear();
+            block_terminated = false;
+        }
+
+        let Some(opcode_byte) = reader.read_byte() else { break };
+        stats.instructions_decoded += 1;
+        let source = SourceLoc::with_opcode(absolute_pc, opcode_byte as u16);
+
+        // Check if this is a MAKE_FUNC that we've already decoded as a separate function
+        if opcode_byte == 55 {
+            let make_func_absolute_pc = absolute_pc;
+            let param_count = reader.read_byte().unwrap_or(0);
+            let capture_count = reader.read_byte().unwrap_or(0);
+            for _ in 0..capture_count { reader.read_byte(); }
+
+            if let Some(func_name) = func_names.get(&make_func_absolute_pc) {
+                // Push the function name as a callable reference
+                let var = builder.emit_sourced(
+                    OpCode::Const,
+                    vec![Operand::Const(Value::string(func_name))],
+                    source,
+                );
+                sym_stack.push(var);
+            } else {
+                // Unknown MAKE_FUNC (nested?) — push placeholder
+                let var = builder.emit_sourced(
+                    OpCode::Const,
+                    vec![Operand::Const(Value::string(format!(
+                        "<closure params={param_count} captures={capture_count}>"
+                    )))],
+                    source,
+                );
+                sym_stack.push(var);
+            }
+            continue;
+        }
+
+        // All other opcodes — same dispatch as decode_plv3
+        dispatch_opcode(
+            opcode_byte,
+            source,
+            absolute_pc,
+            &mut reader,
+            builder,
+            &mut sym_stack,
+            &mut block_terminated,
+            &block_map,
+            current_block,
+            stats,
+        );
+    }
+
+    // Ensure the last block has a terminator
+    if !block_terminated {
+        builder.halt();
+    }
+}
+
+// Note: blocks that end with Unreachable (never reached by the decoder)
+// are left as-is. The interpreter will error if it tries to execute them,
+// which helps identify connectivity issues in the decoder.
+
+/// Dispatch a single opcode. Extracted from decode_plv3 for reuse.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_opcode(
+    opcode_byte: u8,
+    source: SourceLoc,
+    absolute_pc: usize,
+    reader: &mut Plv3Reader<'_>,
+    builder: &mut IrBuilder,
+    sym_stack: &mut Vec<Var>,
+    block_terminated: &mut bool,
+    block_map: &std::collections::HashMap<usize, BlockId>,
+    current_block: BlockId,
+    stats: &mut DecodeStats,
+) {
+    match opcode_byte {
+        // ═══ ARITHMETIC ═════════════════════════════════════════
+        30  => binary_op(builder, sym_stack, OpCode::Add, source),
+        105 => binary_op(builder, sym_stack, OpCode::Mul, source),
+        164 => binary_op(builder, sym_stack, OpCode::Sub, source),
+        2   => binary_op(builder, sym_stack, OpCode::Div, source),
+        233 => binary_op(builder, sym_stack, OpCode::Mod, source),
+        19  => binary_op(builder, sym_stack, OpCode::BitXor, source),
+        104 => binary_op(builder, sym_stack, OpCode::BitAnd, source),
+        138 => binary_op(builder, sym_stack, OpCode::BitOr, source),
+        157 => binary_op(builder, sym_stack, OpCode::Shr, source),
+        72  => binary_op(builder, sym_stack, OpCode::UShr, source),
+        119 => binary_op(builder, sym_stack, OpCode::Shl, source),
+        128 => unary_op(builder, sym_stack, OpCode::Neg, source),
+        51  => unary_op(builder, sym_stack, OpCode::BitNot, source),
+        64  => unary_op(builder, sym_stack, OpCode::LogicalNot, source),
+        41  => unary_op(builder, sym_stack, OpCode::Pos, source),
+        175 => unary_op(builder, sym_stack, OpCode::TypeOf, source),
+        15  => unary_op(builder, sym_stack, OpCode::Void, source),
+        21  => binary_op(builder, sym_stack, OpCode::StrictEq, source),
+        60  => binary_op(builder, sym_stack, OpCode::Eq, source),
+        246 => binary_op(builder, sym_stack, OpCode::Lt, source),
+        112 => binary_op(builder, sym_stack, OpCode::Gt, source),
+        35 => {
+            let right = stack_pop(sym_stack, builder);
+            let left = stack_pop(sym_stack, builder);
+            let diff = builder.emit_sourced(OpCode::Sub, vec![Operand::Var(left), Operand::Var(right)], source);
+            let zero = builder.const_number(0.0);
+            let result = builder.emit(OpCode::StrictEq, vec![Operand::Var(diff), Operand::Var(zero)]);
+            sym_stack.push(result);
+        }
+        57 => {
+            let right = stack_pop(sym_stack, builder);
+            let left = stack_pop(sym_stack, builder);
+            let result = builder.emit_sourced(OpCode::HasProp, vec![Operand::Var(left), Operand::Var(right)], source);
+            sym_stack.push(result);
+        }
+        225       => imm_binary(builder, sym_stack, reader, OpCode::Add, source),
+        152 | 129 => imm_binary(builder, sym_stack, reader, OpCode::BitXor, source),
+        188       => imm_binary(builder, sym_stack, reader, OpCode::BitAnd, source),
+        253       => imm_binary(builder, sym_stack, reader, OpCode::Shr, source),
+        125       => imm_binary(builder, sym_stack, reader, OpCode::UShr, source),
+        73        => imm_binary(builder, sym_stack, reader, OpCode::Shl, source),
+        62        => imm_binary(builder, sym_stack, reader, OpCode::Mod, source),
+
+        // ═══ PUSH ═══════════════════════════════════════════════
+        66 => {
+            let value = reader.read_typed_value().unwrap_or(Value::Undefined);
+            let var = builder.emit_sourced(OpCode::Const, vec![Operand::Const(value)], source);
+            sym_stack.push(var);
+        }
+        207 => {
+            let var = builder.emit_sourced(OpCode::LoadScope, vec![Operand::Const(Value::string("window"))], source);
+            sym_stack.push(var);
+        }
+        46 => { sym_stack.pop(); let v = reader.read_typed_value().unwrap_or(Value::Undefined); let var = builder.emit_sourced(OpCode::Const, vec![Operand::Const(v)], source); sym_stack.push(var); }
+        29 => { let r = reader.read_u16_be().unwrap_or(0); push_reg(builder, sym_stack, r, source); }
+        232 | 32 => { let a = reader.read_u16_be().unwrap_or(0); let b = reader.read_u16_be().unwrap_or(0); push_reg(builder, sym_stack, a, source); push_reg(builder, sym_stack, b, source); }
+        221 => { let a = reader.read_u16_be().unwrap_or(0); let b = reader.read_u16_be().unwrap_or(0); let c = reader.read_u16_be().unwrap_or(0); push_reg(builder, sym_stack, a, source); push_reg(builder, sym_stack, b, source); push_reg(builder, sym_stack, c, source); }
+        150 => { let r = reader.read_u16_be().unwrap_or(0); push_reg(builder, sym_stack, r, source); let v = reader.read_typed_value().unwrap_or(Value::Undefined); let var = builder.emit(OpCode::Const, vec![Operand::Const(v)]); sym_stack.push(var); }
+        47 => { let a = reader.read_u16_be().unwrap_or(0); let b = reader.read_u16_be().unwrap_or(0); push_reg(builder, sym_stack, a, source); push_reg(builder, sym_stack, b, source); let v = reader.read_typed_value().unwrap_or(Value::Undefined); let var = builder.emit(OpCode::Const, vec![Operand::Const(v)]); sym_stack.push(var); }
+        31 => { let r = reader.read_u16_be().unwrap_or(0); let imm = reader.read_typed_value().unwrap_or(Value::Undefined); let rv = load_reg(builder, r, source); let iv = builder.emit(OpCode::Const, vec![Operand::Const(imm)]); let res = builder.emit_sourced(OpCode::BitAnd, vec![Operand::Var(rv), Operand::Var(iv)], source); sym_stack.push(res); }
+        118 => { let a = reader.read_u16_be().unwrap_or(0); let b = reader.read_u16_be().unwrap_or(0); let imm = reader.read_typed_value().unwrap_or(Value::Undefined); let obj = load_reg(builder, a, source); let kr = load_reg(builder, b, source); let iv = builder.emit(OpCode::Const, vec![Operand::Const(imm)]); let mk = builder.emit(OpCode::BitAnd, vec![Operand::Var(kr), Operand::Var(iv)]); let res = builder.emit_sourced(OpCode::LoadProp, vec![Operand::Var(obj), Operand::Var(mk)], source); sym_stack.push(res); }
+        85 => { let f = reader.read_u16_be().unwrap_or(0); let var = load_frame(builder, f, source); sym_stack.push(var); }
+        183 => { let f = reader.read_u16_be().unwrap_or(0); let fv = load_frame(builder, f, source); sym_stack.push(fv); let v = reader.read_typed_value().unwrap_or(Value::Undefined); let iv = builder.emit(OpCode::Const, vec![Operand::Const(v)]); sym_stack.push(iv); }
+        174 => { let r = reader.read_u16_be().unwrap_or(0); let f = reader.read_u16_be().unwrap_or(0); push_reg(builder, sym_stack, r, source); let fv = load_frame(builder, f, source); sym_stack.push(fv); }
+        71 => { let f = reader.read_u16_be().unwrap_or(0); let var = builder.emit_sourced(OpCode::LoadScope, vec![Operand::Const(Value::string(format!("upval_{f}")))], source); sym_stack.push(var); }
+        115 => { let a = reader.read_u16_be().unwrap_or(0); let b = reader.read_u16_be().unwrap_or(0); let obj = load_reg(builder, a, source); let key = load_reg(builder, b, source); let res = builder.emit_sourced(OpCode::LoadProp, vec![Operand::Var(obj), Operand::Var(key)], source); sym_stack.push(res); }
+        250 => { let r = reader.read_u16_be().unwrap_or(0); let imm = reader.read_typed_value().unwrap_or(Value::Undefined); let obj = load_reg(builder, r, source); let key = builder.emit(OpCode::Const, vec![Operand::Const(imm)]); let res = builder.emit_sourced(OpCode::LoadProp, vec![Operand::Var(obj), Operand::Var(key)], source); sym_stack.push(res); }
+        109 => { let a = reader.read_u16_be().unwrap_or(0); let b = reader.read_u16_be().unwrap_or(0); let imm = reader.read_typed_value().unwrap_or(Value::Undefined); let obj = load_reg(builder, a, source); let kr = load_reg(builder, b, source); let iv = builder.emit(OpCode::Const, vec![Operand::Const(imm)]); let mk = builder.emit(OpCode::BitAnd, vec![Operand::Var(kr), Operand::Var(iv)]); let res = builder.emit_sourced(OpCode::LoadProp, vec![Operand::Var(obj), Operand::Var(mk)], source); sym_stack.push(res); }
+        238 => { let count = reader.read_byte().unwrap_or(0) as usize; for _ in 0..count { let v = reader.read_typed_value().unwrap_or(Value::Undefined); let var = builder.emit(OpCode::Const, vec![Operand::Const(v)]); sym_stack.push(var); } }
+        155 => { sym_stack.pop(); }
+        0   => { sym_stack.pop(); sym_stack.pop(); }
+        179 => { let count = reader.read_u16_be().unwrap_or(0) as usize; for _ in 0..count.min(sym_stack.len()) { sym_stack.pop(); } }
+
+        // ═══ COLLECT ════════════════════════════════════════════
+        191 => {
+            let count = reader.read_u16_be().unwrap_or(0) as usize;
+            let array_var = builder.emit_sourced(OpCode::NewArray, vec![], source);
+            let to_drain = count.min(sym_stack.len());
+            let start = sym_stack.len() - to_drain;
+            for index in 0..to_drain {
+                let elem = sym_stack[start + (to_drain - 1 - index)];
+                let idx_var = builder.const_number(index as f64);
+                builder.store_index(array_var, idx_var, elem);
+            }
+            sym_stack.truncate(start);
+            sym_stack.push(array_var);
+        }
+        166 => { let obj = stack_pop(sym_stack, builder); let res = builder.emit_sourced(OpCode::CallMethod, vec![Operand::Var(obj), Operand::Const(Value::string("__keys__"))], source); sym_stack.push(res); }
+        106 => { let count = reader.read_u16_be().unwrap_or(0) as usize; let obj = builder.emit_sourced(OpCode::NewObject, vec![], source); let pairs = count.min(sym_stack.len() / 2); for _ in 0..pairs { let val = stack_pop(sym_stack, builder); let key = stack_pop(sym_stack, builder); builder.store_prop(obj, key, val); } sym_stack.push(obj); }
+
+        // ═══ PROPERTY GET ═══════════════════════════════════════
+        202 => { let key = stack_pop(sym_stack, builder); let obj = stack_pop(sym_stack, builder); let res = builder.emit_sourced(OpCode::LoadProp, vec![Operand::Var(obj), Operand::Var(key)], source); sym_stack.push(res); }
+        101 => { let kv = reader.read_typed_value().unwrap_or(Value::Undefined); let obj = stack_pop(sym_stack, builder); let key = builder.emit(OpCode::Const, vec![Operand::Const(kv)]); let res = builder.emit_sourced(OpCode::LoadProp, vec![Operand::Var(obj), Operand::Var(key)], source); sym_stack.push(res); }
+        136 => { let r = reader.read_u16_be().unwrap_or(0); let obj = stack_pop(sym_stack, builder); let key = load_reg(builder, r, source); let res = builder.emit_sourced(OpCode::LoadProp, vec![Operand::Var(obj), Operand::Var(key)], source); sym_stack.push(res); }
+        184 => { let f = reader.read_u16_be().unwrap_or(0); let obj = stack_pop(sym_stack, builder); let key = load_frame(builder, f, source); let res = builder.emit_sourced(OpCode::LoadProp, vec![Operand::Var(obj), Operand::Var(key)], source); sym_stack.push(res); }
+        54 => { let r = reader.read_u16_be().unwrap_or(0); let imm = reader.read_typed_value().unwrap_or(Value::Undefined); let obj = stack_pop(sym_stack, builder); let kr = load_reg(builder, r, source); let iv = builder.emit(OpCode::Const, vec![Operand::Const(imm)]); let mk = builder.emit(OpCode::BitAnd, vec![Operand::Var(kr), Operand::Var(iv)]); let res = builder.emit_sourced(OpCode::LoadProp, vec![Operand::Var(obj), Operand::Var(mk)], source); sym_stack.push(res); }
+        26 => { let imm = reader.read_typed_value().unwrap_or(Value::Undefined); let key = stack_pop(sym_stack, builder); let obj = stack_pop(sym_stack, builder); let prop = builder.emit_sourced(OpCode::LoadProp, vec![Operand::Var(obj), Operand::Var(key)], source); let iv = builder.emit(OpCode::Const, vec![Operand::Const(imm)]); let res = builder.emit(OpCode::BitXor, vec![Operand::Var(prop), Operand::Var(iv)]); sym_stack.push(res); }
+        229 => { let imm = reader.read_typed_value().unwrap_or(Value::Undefined); let key = stack_pop(sym_stack, builder); let obj = stack_pop(sym_stack, builder); let res = builder.emit_sourced(OpCode::LoadProp, vec![Operand::Var(obj), Operand::Var(key)], source); sym_stack.push(res); let iv = builder.emit(OpCode::Const, vec![Operand::Const(imm)]); sym_stack.push(iv); }
+        178 => { let idx = stack_pop(sym_stack, builder); let mask = stack_pop(sym_stack, builder); let obj = stack_pop(sym_stack, builder); let mk = builder.emit(OpCode::BitAnd, vec![Operand::Var(mask), Operand::Var(idx)]); let res = builder.emit_sourced(OpCode::LoadProp, vec![Operand::Var(obj), Operand::Var(mk)], source); sym_stack.push(res); }
+        249 => { let imm = reader.read_typed_value().unwrap_or(Value::Undefined); let idx = stack_pop(sym_stack, builder); let obj = stack_pop(sym_stack, builder); let iv = builder.emit(OpCode::Const, vec![Operand::Const(imm)]); let mk = builder.emit(OpCode::BitAnd, vec![Operand::Var(idx), Operand::Var(iv)]); let res = builder.emit_sourced(OpCode::LoadProp, vec![Operand::Var(obj), Operand::Var(mk)], source); sym_stack.push(res); }
+
+        // ═══ PROPERTY SET ═══════════════════════════════════════
+        81 => { let key = stack_pop(sym_stack, builder); let obj = stack_pop(sym_stack, builder); if let Some(&val) = sym_stack.last() { builder.store_prop(obj, key, val); } }
+        237 => { let key = stack_pop(sym_stack, builder); let obj = stack_pop(sym_stack, builder); let val = stack_pop(sym_stack, builder); builder.store_prop(obj, key, val); }
+
+        // ═══ REGISTER OPS ═══════════════════════════════════════
+        224 => { let r = reader.read_u16_be().unwrap_or(0); let val = stack_pop(sym_stack, builder); store_reg(builder, r, val); }
+        22 => { let r = reader.read_u16_be().unwrap_or(0); if let Some(&tos) = sym_stack.last() { store_reg(builder, r, tos); } }
+        211 => { let r = reader.read_u16_be().unwrap_or(0); let tos = stack_pop(sym_stack, builder); let rv = load_reg(builder, r, source); let res = builder.emit_sourced(OpCode::BitXor, vec![Operand::Var(tos), Operand::Var(rv)], source); sym_stack.push(res); }
+        124 => { let r = reader.read_u16_be().unwrap_or(0); let tos = stack_pop(sym_stack, builder); let rv = load_reg(builder, r, source); let res = builder.emit_sourced(OpCode::Sub, vec![Operand::Var(tos), Operand::Var(rv)], source); sym_stack.push(res); }
+        245 => { let a = reader.read_u16_be().unwrap_or(0); let b = reader.read_u16_be().unwrap_or(0); let val = stack_pop(sym_stack, builder); let obj = load_reg(builder, a, source); let key = load_reg(builder, b, source); builder.store_prop(obj, key, val); }
+        44 => { let a = reader.read_u16_be().unwrap_or(0); let b = reader.read_u16_be().unwrap_or(0); let imm = reader.read_typed_value().unwrap_or(Value::Undefined); let val = stack_pop(sym_stack, builder); let obj = load_reg(builder, a, source); let kr = load_reg(builder, b, source); let iv = builder.emit(OpCode::Const, vec![Operand::Const(imm)]); let mk = builder.emit(OpCode::BitAnd, vec![Operand::Var(kr), Operand::Var(iv)]); builder.store_prop(obj, mk, val); }
+        84 => { let a = reader.read_u16_be().unwrap_or(0); let b = reader.read_u16_be().unwrap_or(0); let c = reader.read_u16_be().unwrap_or(0); let obj = load_reg(builder, a, source); let key = load_reg(builder, b, source); let res = builder.emit_sourced(OpCode::LoadProp, vec![Operand::Var(obj), Operand::Var(key)], source); store_reg(builder, c, res); }
+
+        // ═══ FRAME OPS ══════════════════════════════════════════
+        172 => { let f = reader.read_u16_be().unwrap_or(0); if let Some(&tos) = sym_stack.last() { store_frame(builder, f, tos); } }
+        18 => { let f = reader.read_u16_be().unwrap_or(0); let val = stack_pop(sym_stack, builder); store_frame(builder, f, val); }
+        110 => { let f = reader.read_u16_be().unwrap_or(0); let cur = load_frame(builder, f, source); let one = builder.const_number(1.0); let inc = builder.emit(OpCode::Add, vec![Operand::Var(cur), Operand::Var(one)]); store_frame(builder, f, inc); }
+        121 => { let f = reader.read_u16_be().unwrap_or(0); if let Some(&tos) = sym_stack.last() { builder.emit_void(OpCode::StoreScope, vec![Operand::Const(Value::string(format!("upval_{f}"))), Operand::Var(tos)]); } }
+
+        // ═══ FUSED OPS ══════════════════════════════════════════
+        93 => { let r = reader.read_u16_be().unwrap_or(0); sym_stack.pop(); push_reg(builder, sym_stack, r, source); }
+        176 => { let r = reader.read_u16_be().unwrap_or(0); sym_stack.pop(); push_reg(builder, sym_stack, r, source); }
+        168 => { let a = reader.read_u16_be().unwrap_or(0); let b = reader.read_u16_be().unwrap_or(0); sym_stack.pop(); push_reg(builder, sym_stack, a, source); push_reg(builder, sym_stack, b, source); }
+        151 => { let rs = reader.read_u16_be().unwrap_or(0); let rp = reader.read_u16_be().unwrap_or(0); if let Some(&tos) = sym_stack.last() { store_reg(builder, rs, tos); } sym_stack.pop(); push_reg(builder, sym_stack, rp, source); }
+        10 => { let rs = reader.read_u16_be().unwrap_or(0); let a = reader.read_u16_be().unwrap_or(0); let b = reader.read_u16_be().unwrap_or(0); if let Some(&tos) = sym_stack.last() { store_reg(builder, rs, tos); } sym_stack.pop(); push_reg(builder, sym_stack, a, source); push_reg(builder, sym_stack, b, source); }
+        251 => { let rs = reader.read_u16_be().unwrap_or(0); let a = reader.read_u16_be().unwrap_or(0); let b = reader.read_u16_be().unwrap_or(0); if let Some(&tos) = sym_stack.last() { store_reg(builder, rs, tos); } sym_stack.pop(); push_reg(builder, sym_stack, a, source); push_reg(builder, sym_stack, b, source); }
+        111 => { let r = reader.read_u16_be().unwrap_or(0); let imm = reader.read_typed_value().unwrap_or(Value::Undefined); let val = stack_pop(sym_stack, builder); store_reg(builder, r, val); let iv = builder.emit(OpCode::Const, vec![Operand::Const(imm)]); sym_stack.push(iv); }
+        212 => { let rs = reader.read_u16_be().unwrap_or(0); let a = reader.read_u16_be().unwrap_or(0); let b = reader.read_u16_be().unwrap_or(0); let right = stack_pop(sym_stack, builder); let left = stack_pop(sym_stack, builder); let xored = builder.emit_sourced(OpCode::BitXor, vec![Operand::Var(left), Operand::Var(right)], source); store_reg(builder, rs, xored); push_reg(builder, sym_stack, a, source); push_reg(builder, sym_stack, b, source); }
+        120 => { let a = reader.read_u16_be().unwrap_or(0); let b = reader.read_u16_be().unwrap_or(0); let c = reader.read_u16_be().unwrap_or(0); let obj = load_reg(builder, a, source); let key = load_reg(builder, b, source); let val = load_reg(builder, c, source); builder.store_prop(obj, key, val); }
+        45 => { let a = reader.read_u16_be().unwrap_or(0); let b = reader.read_u16_be().unwrap_or(0); let c = reader.read_u16_be().unwrap_or(0); let key = stack_pop(sym_stack, builder); let obj = stack_pop(sym_stack, builder); if let Some(&val) = sym_stack.last() { builder.store_prop(obj, key, val); } sym_stack.pop(); push_reg(builder, sym_stack, a, source); push_reg(builder, sym_stack, b, source); push_reg(builder, sym_stack, c, source); }
+        114 => { let rs = reader.read_u16_be().unwrap_or(0); let rp = reader.read_u16_be().unwrap_or(0); let key = stack_pop(sym_stack, builder); let obj = stack_pop(sym_stack, builder); let res = builder.emit_sourced(OpCode::LoadProp, vec![Operand::Var(obj), Operand::Var(key)], source); store_reg(builder, rs, res); push_reg(builder, sym_stack, rp, source); }
+
+        // ═══ CALLS ══════════════════════════════════════════════
+        255 => { let this_obj = stack_pop(sym_stack, builder); let func = stack_pop(sym_stack, builder); let res = builder.emit_sourced(OpCode::Call, vec![Operand::Const(Value::string("__bind__")), Operand::Var(func), Operand::Var(this_obj)], source); sym_stack.push(res); }
+        147 => {
+            let argc = reader.read_byte().unwrap_or(0) as usize;
+            let mut args: Vec<Var> = Vec::new();
+            for _ in 0..argc { args.push(stack_pop(sym_stack, builder)); }
+            args.reverse();
+            let callable = stack_pop(sym_stack, builder);
+            let mut operands = vec![Operand::Var(callable)];
+            operands.extend(args.iter().map(|var| Operand::Var(*var)));
+            let result = builder.emit_sourced(OpCode::Call, operands, source);
+            sym_stack.push(result);
+        }
+        87 => {
+            let argc = reader.read_byte().unwrap_or(0) as usize;
+            let mut args: Vec<Var> = Vec::new();
+            for _ in 0..argc { args.push(stack_pop(sym_stack, builder)); }
+            args.reverse();
+            let ctor = stack_pop(sym_stack, builder);
+            let mut operands = vec![Operand::Const(Value::string("new")), Operand::Var(ctor)];
+            operands.extend(args.iter().map(|var| Operand::Var(*var)));
+            let result = builder.emit_sourced(OpCode::Call, operands, source);
+            sym_stack.push(result);
+        }
+
+        // ═══ CONTROL FLOW ═══════════════════════════════════════
+        189 => { // JMP_FWD
+            let offset = reader.read_u16_be().unwrap_or(0) as usize;
+            // After reading opcode(1) + u16(2), reader is at absolute_pc + 3
+            let abs_after_operand = absolute_pc + 3;
+            let abs_jmp_target = abs_after_operand + offset;
+            if let Some(&target_block) = block_map.get(&abs_jmp_target) {
+                builder.jump(target_block);
+            }
+            stats.jumps += 1; *block_terminated = true;
+        }
+        20 => {
+            let offset = reader.read_u16_be().unwrap_or(0) as usize;
+            let abs_reader_pos = absolute_pc + 1 + 2;
+            let abs_jmp_target = abs_reader_pos.saturating_sub(offset);
+            if let Some(&target_block) = block_map.get(&abs_jmp_target) {
+                builder.jump(target_block);
+            }
+            stats.jumps += 1; *block_terminated = true;
+        }
+        42 => {
+            let offset = reader.read_u16_be().unwrap_or(0) as usize;
+            let abs_reader_pos = absolute_pc + 1 + 2;
+            let abs_false_target = abs_reader_pos + offset;
+            let cond = stack_pop(sym_stack, builder);
+            if let Some(&false_block) = block_map.get(&abs_false_target) {
+                let true_block = block_map.get(&abs_reader_pos).copied().unwrap_or(current_block);
+                builder.branch_if(cond, true_block, false_block);
+            }
+            stats.branches += 1; *block_terminated = true;
+        }
+        169 => {
+            let offset = reader.read_u16_be().unwrap_or(0) as usize;
+            let abs_reader_pos = absolute_pc + 1 + 2;
+            let abs_target = abs_reader_pos + offset;
+            if let Some(&cond_var) = sym_stack.last()
+                && let Some(&target_block) = block_map.get(&abs_target)
+            {
+                let continue_block = block_map.get(&abs_reader_pos).copied().unwrap_or(current_block);
+                builder.branch_if(cond_var, continue_block, target_block);
+            }
+            stats.branches += 1; *block_terminated = true;
+        }
+        89 => {
+            let offset = reader.read_u16_be().unwrap_or(0) as usize;
+            let abs_reader_pos = absolute_pc + 1 + 2;
+            let abs_target = abs_reader_pos + offset;
+            if let Some(&cond_var) = sym_stack.last()
+                && let Some(&target_block) = block_map.get(&abs_target)
+            {
+                let continue_block = block_map.get(&abs_reader_pos).copied().unwrap_or(current_block);
+                builder.branch_if(cond_var, target_block, continue_block);
+            }
+            stats.branches += 1; *block_terminated = true;
+        }
+
+        // ═══ RETURN / HALT ══════════════════════════════════════
+        197 => { let rv = sym_stack.pop(); builder.ret(rv); stats.returns += 1; *block_terminated = true; }
+        116 => { let f = reader.read_u16_be().unwrap_or(0); let fv = load_frame(builder, f, source); builder.ret(Some(fv)); stats.returns += 1; *block_terminated = true; }
+        195 => { builder.halt(); stats.halts += 1; *block_terminated = true; }
+
+        _ => { stats.unknown_opcodes += 1; }
+    }
+}
+
+/// Find jump targets within a bytecode region, skipping over function body ranges.
+fn find_block_starts_in_region_skipping(
+    region_bytecode: &[u8],
+    base_pc: usize,
+    skip_ranges: &[(usize, usize)],
+) -> Vec<usize> {
+    let in_skip = |pc: usize| skip_ranges.iter().any(|(start, end)| pc >= *start && pc < *end);
+
+    let mut targets = std::collections::BTreeSet::new();
+    targets.insert(base_pc);
+    let mut reader = Plv3Reader::new(region_bytecode);
+
+    while !reader.at_end() {
+        let abs_pc = base_pc + reader.position;
+
+        // Skip over function body ranges
+        if in_skip(abs_pc) {
+            // Find the end of this skip range and jump there
+            if let Some(&(_, end)) = skip_ranges.iter().find(|(start, end)| abs_pc >= *start && abs_pc < *end) {
+                let skip_to = end - base_pc;
+                if skip_to <= region_bytecode.len() {
+                    reader.position = skip_to;
+                } else {
+                    break;
+                }
+            } else {
+                reader.read_byte(); // shouldn't happen, but advance
+            }
+            continue;
+        }
+
+        let Some(opcode) = reader.read_byte() else { break };
+
+        match opcode {
+            20 => { // JMP_BACK
+                let offset = reader.read_u16_be().unwrap_or(0) as usize;
+                let abs_pos = base_pc + reader.position;
+                let target = abs_pos.saturating_sub(offset);
+                if !in_skip(target) { targets.insert(target); }
+                if !in_skip(abs_pos) { targets.insert(abs_pos); }
+            }
+            189 => { // JMP_FWD
+                let offset = reader.read_u16_be().unwrap_or(0) as usize;
+                let abs_pos = base_pc + reader.position;
+                let target = abs_pos + offset;
+                if !in_skip(target) { targets.insert(target); }
+                if !in_skip(abs_pos) { targets.insert(abs_pos); }
+            }
+            42 | 169 | 89 => { // conditional jumps
+                let offset = reader.read_u16_be().unwrap_or(0) as usize;
+                let abs_pos = base_pc + reader.position;
+                let target = abs_pos + offset;
+                if !in_skip(target) { targets.insert(target); }
+                if !in_skip(abs_pos) { targets.insert(abs_pos); }
+            }
+            _ => { crate::funcmap::skip_operands_pub(opcode, &mut reader); }
+        }
+    }
+
+    targets.into_iter().collect()
+}
+
 /// First pass: find all jump targets to create blocks.
 fn find_block_starts(bytecode: &[u8]) -> Vec<usize> {
     let mut targets = std::collections::BTreeSet::new();

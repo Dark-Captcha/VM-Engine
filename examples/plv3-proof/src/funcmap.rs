@@ -103,6 +103,11 @@ pub fn find_func_ranges(bytecode: &[u8]) -> FuncMap {
     }
 }
 
+/// Skip operands for a known opcode. Public for use by decoder's block scanner.
+pub fn skip_operands_pub(opcode: u8, reader: &mut Plv3Reader<'_>) {
+    skip_operands(opcode, reader);
+}
+
 /// Skip operands for a known opcode (used during MAKE_FUNC scanning).
 fn skip_operands(opcode: u8, reader: &mut Plv3Reader<'_>) {
     match opcode {
