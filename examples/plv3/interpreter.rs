@@ -133,6 +133,11 @@ impl<'a> Plv3Vm<'a> {
             };
             self.instruction_count += 1;
 
+            // Trace opcodes near the first wrong branch
+            if pc >= 19190 && pc <= 19230 {
+                eprintln!("[trace] PC={pc} op={opcode} stack_depth={}", self.stack.len());
+            }
+
             self.dispatch(opcode, pc, hook)?;
         }
 
@@ -293,7 +298,14 @@ impl<'a> Plv3Vm<'a> {
             }
 
             // ═══ PROPERTY GET ═══════════════════════════════════
-            202 => { let key = self.pop(); let obj = self.pop(); self.push(self.get_prop(&obj, &key)); }
+            202 => {
+                let key = self.pop(); let obj = self.pop();
+                let result = self.get_prop(&obj, &key);
+                if pc >= 19190 && pc <= 19230 {
+                    eprintln!("[get-prop] PC={pc} obj={} key={} → {}", val_preview(&obj), val_preview(&key), val_preview(&result));
+                }
+                self.push(result);
+            }
             101 => { let key = self.read_typed_value(); let obj = self.pop(); self.push(self.get_prop(&obj, &key)); }
             136 => { let r = self.read_u16(); let obj = self.pop(); let key = self.get_reg(r); self.push(self.get_prop(&obj, &key)); }
             184 => { let f = self.read_u16(); let obj = self.pop(); let key = self.get_frame(f); self.push(self.get_prop(&obj, &key)); }
@@ -592,7 +604,17 @@ impl<'a> Plv3Vm<'a> {
             42  => { // JMP_IF_FALSY (1g): pop, if falsy jump
                 let offset = self.read_u16() as usize;
                 let cond = self.pop();
-                if is_falsy(&cond) {
+                let falsy = is_falsy(&cond);
+                if pc > 18000 && pc < 19500 {
+                    static BR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                    let br = BR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if br < 20 {
+                        let target = self.reader.position + offset;
+                        eprintln!("[branch] #{br} PC={pc} JMP_IF_FALSY cond={} falsy={falsy} target={target}",
+                            val_preview(&cond));
+                    }
+                }
+                if falsy {
                     self.reader.position += offset;
                 }
             }
@@ -732,7 +754,16 @@ impl<'a> Plv3Vm<'a> {
                     }
                     _ => coerce::to_string(key),
                 };
-                self.heap.get_property(*oid, &key_str)
+                let result = self.heap.get_property(*oid, &key_str);
+                // Trace missing properties on web objects (global and its children)
+                if matches!(result, Value::Undefined) && !key_str.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+                    static MP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                    let mp = MP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if mp < 60 {
+                        eprintln!("[missing-prop] obj#{} key=\"{key_str}\"", oid.index());
+                    }
+                }
+                result
             }
             Value::String(s) => {
                 match key {

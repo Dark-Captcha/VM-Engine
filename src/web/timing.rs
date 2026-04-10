@@ -73,6 +73,28 @@ pub fn install_timing(heap: &mut Heap, global: ObjectId, config: &TimingConfig) 
     });
     let performance_object = heap.alloc();
     heap.set_property(performance_object, "now", Value::Object(perf_now_fn));
+
+    // performance.timing (Navigation Timing API — deprecated but widely used)
+    let timing = heap.alloc();
+    let base_time = config.date_now_start_ms;
+    heap.set_property(timing, "navigationStart", Value::number(base_time - 500.0));
+    heap.set_property(timing, "fetchStart", Value::number(base_time - 400.0));
+    heap.set_property(timing, "domainLookupStart", Value::number(base_time - 350.0));
+    heap.set_property(timing, "domainLookupEnd", Value::number(base_time - 340.0));
+    heap.set_property(timing, "connectStart", Value::number(base_time - 340.0));
+    heap.set_property(timing, "connectEnd", Value::number(base_time - 300.0));
+    heap.set_property(timing, "requestStart", Value::number(base_time - 300.0));
+    heap.set_property(timing, "responseStart", Value::number(base_time - 200.0));
+    heap.set_property(timing, "responseEnd", Value::number(base_time - 100.0));
+    heap.set_property(timing, "domLoading", Value::number(base_time - 80.0));
+    heap.set_property(timing, "domInteractive", Value::number(base_time - 50.0));
+    heap.set_property(timing, "domContentLoadedEventStart", Value::number(base_time - 40.0));
+    heap.set_property(timing, "domContentLoadedEventEnd", Value::number(base_time - 30.0));
+    heap.set_property(timing, "domComplete", Value::number(base_time - 10.0));
+    heap.set_property(timing, "loadEventStart", Value::number(base_time - 5.0));
+    heap.set_property(timing, "loadEventEnd", Value::number(base_time));
+    heap.set_property(performance_object, "timing", Value::Object(timing));
+
     heap.set_property(global, "performance", Value::Object(performance_object));
 }
 

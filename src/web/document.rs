@@ -100,6 +100,25 @@ pub fn install_document(heap: &mut Heap, global: ObjectId, config: &DocumentConf
     heap.set_property(body, "removeChild", Value::Object(remove_child));
     heap.set_property(document, "body", Value::Object(body));
 
+    // document.lastModified — standard DOM property, returns date string
+    heap.set_property(document, "lastModified", Value::string("01/01/2025 00:00:00"));
+
+    // document.referrer
+    heap.set_property(document, "referrer", Value::string(""));
+
+    // document.cookie
+    heap.set_property(document, "cookie", Value::string(""));
+
+    // document.title
+    heap.set_property(document, "title", Value::string(""));
+
+    // document.readyState
+    heap.set_property(document, "readyState", Value::string("complete"));
+
+    // document.hidden / document.visibilityState
+    heap.set_property(document, "hidden", Value::bool(false));
+    heap.set_property(document, "visibilityState", Value::string("visible"));
+
     heap.set_property(global, "document", Value::Object(document));
 
     // Also expose location directly on global (common JS pattern)
