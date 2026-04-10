@@ -15,16 +15,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
-name = "plv3-proof"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "vm-engine-core",
- "vm-engine-disasm",
- "vm-engine-web",
-]
-
-[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -122,24 +112,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
-name = "vm-engine-core"
+name = "vm-engine"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "thiserror",
-]
-
-[[package]]
-name = "vm-engine-disasm"
-version = "0.1.0"
-dependencies = [
- "vm-engine-core",
-]
-
-[[package]]
-name = "vm-engine-web"
-version = "0.1.0"
-dependencies = [
- "vm-engine-core",
 ]
 
 [[package]]

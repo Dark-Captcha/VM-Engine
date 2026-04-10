@@ -1,7 +1,0 @@
-[package]
-name = "vm-engine-disasm"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-vm-engine-core = { path = "../vm-engine-core" }
