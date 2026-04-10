@@ -529,6 +529,8 @@ impl<'m, H: Hook> Interpreter<'m, H> {
             Terminator::BranchIf { cond, if_true, if_false } => {
                 let val = self.state.get_var(*cond);
                 let taken = coerce::to_boolean(&val);
+
+
                 self.state.previous_block = Some(current_block);
                 self.state.cursor.block = if taken { *if_true } else { *if_false };
                 self.state.cursor.instruction = 0;

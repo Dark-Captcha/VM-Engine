@@ -83,6 +83,23 @@ pub fn install_document(heap: &mut Heap, global: ObjectId, config: &DocumentConf
     let query_selector = heap.alloc_native(|_args, _heap| Value::Null);
     heap.set_property(document, "querySelector", Value::Object(query_selector));
 
+    // document.body — PLV3 needs body.appendChild/removeChild for clientWidth measurement
+    let body = heap.alloc();
+    let append_child = heap.alloc_native(|args, heap| {
+        // appendChild returns the child; set clientWidth on it for PLV3 measurement
+        if let Some(Value::Object(child)) = args.first() {
+            // PLV3 creates a div with width:29px + paddingLeft:17px in content-box → clientWidth=46
+            heap.set_property(*child, "clientWidth", Value::number(46.0));
+        }
+        args.first().cloned().unwrap_or(Value::Undefined)
+    });
+    heap.set_property(body, "appendChild", Value::Object(append_child));
+    let remove_child = heap.alloc_native(|args, _heap| {
+        args.first().cloned().unwrap_or(Value::Undefined)
+    });
+    heap.set_property(body, "removeChild", Value::Object(remove_child));
+    heap.set_property(document, "body", Value::Object(body));
+
     heap.set_property(global, "document", Value::Object(document));
 
     // Also expose location directly on global (common JS pattern)
