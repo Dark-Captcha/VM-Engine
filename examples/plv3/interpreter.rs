@@ -153,7 +153,18 @@ impl<'a> Plv3Vm<'a> {
             2   => { let r = self.pop(); let l = self.pop(); self.push(ops::binary(BinaryOp::Div, &l, &r)); }
             233 => { let r = self.pop(); let l = self.pop(); self.push(ops::binary(BinaryOp::Mod, &l, &r)); }
             19  => { let r = self.pop(); let l = self.pop(); self.push(ops::binary(BinaryOp::BitXor, &l, &r)); }
-            104 => { let r = self.pop(); let l = self.pop(); self.push(ops::binary(BinaryOp::BitAnd, &l, &r)); }
+            104 => {
+                let r = self.pop(); let l = self.pop();
+                let result = ops::binary(BinaryOp::BitAnd, &l, &r);
+                if matches!(&result, Value::Number(n) if n.is_nan()) && self.instruction_count < 200000 {
+                    static NA: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                    let na = NA.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if na < 5 {
+                        eprintln!("[nan-and] #{na} PC={pc} left={} right={} → NaN", val_preview(&l), val_preview(&r));
+                    }
+                }
+                self.push(result);
+            }
             138 => { let r = self.pop(); let l = self.pop(); self.push(ops::binary(BinaryOp::BitOr, &l, &r)); }
             157 => { let r = self.pop(); let l = self.pop(); self.push(ops::binary(BinaryOp::Shr, &l, &r)); }
             72  => { let r = self.pop(); let l = self.pop(); self.push(ops::binary(BinaryOp::UShr, &l, &r)); }
