@@ -60,8 +60,6 @@ pub struct Plv3Vm<'a> {
     reader: Plv3Reader<'a>,
     /// Runtime stack (the whole point — persists across everything).
     pub stack: Vec<Value>,
-    /// Registers (r0..rN) — addressed by u16.
-    regs: Vec<Value>,
     /// Call stack.
     call_stack: Vec<CallFrame>,
     /// Heap for objects.
@@ -99,7 +97,6 @@ impl<'a> Plv3Vm<'a> {
             bytecode,
             reader: Plv3Reader::new(bytecode),
             stack: Vec::with_capacity(256),
-            regs: vec![Value::Undefined; 1024],
             call_stack: Vec::new(),
             heap,
             global,
@@ -343,8 +340,26 @@ impl<'a> Plv3Vm<'a> {
             }
 
             // ═══ REGISTER STORE ═════════════════════════════════
-            224 => { let r = self.read_u16(); let v = self.pop(); self.set_reg(r, v); }
-            22  => { let r = self.read_u16(); if let Some(tos) = self.stack.last() { self.set_reg(r, tos.clone()); } }
+            224 => {
+                let r = self.read_u16(); let v = self.pop();
+                static SR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                let sr = SR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if sr < 30 {
+                    eprintln!("[store-reg] #{sr} PC={pc} r{r} = {}", val_preview(&v));
+                }
+                self.set_reg(r, v);
+            }
+            22  => {
+                let r = self.read_u16();
+                if let Some(tos) = self.stack.last() {
+                    static SP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                    let sp = SP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if sp < 30 {
+                        eprintln!("[store-peek] #{sp} PC={pc} r{r} = {}", val_preview(tos));
+                    }
+                    self.set_reg(r, tos.clone());
+                }
+            }
 
             // ═══ REGISTER ARITHMETIC ════════════════════════════
             211 => { let r = self.read_u16(); let tos = self.pop(); let rv = self.get_reg(r); self.push(ops::binary(BinaryOp::BitXor, &tos, &rv)); }
@@ -446,10 +461,23 @@ impl<'a> Plv3Vm<'a> {
                 self.push(Value::Object(wrapper));
             }
             147 => { // CALL (1F): pop wrapper, call it with argc
-                // Per PLV3 handler: var e = F(); (0, A[--sp])(e)
-                // The wrapper (from BIND_CALL) receives argc, grabs args from stack.
                 let argc = self.reader.read_byte().unwrap_or(0) as usize;
                 let callable = self.pop();
+
+                // Trace first few calls
+                {
+                    static TC: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                    let tc = TC.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if tc < 3 {
+                        eprintln!("[call-detail] #{tc} PC={pc} argc={argc} stack_depth={} callable={}",
+                            self.stack.len(), val_preview(&callable));
+                        let show = (argc + 2).min(self.stack.len());
+                        for i in 0..show {
+                            let idx = self.stack.len() - 1 - i;
+                            eprintln!("[call-detail]   stack[{}] (TOS-{}) = {}", idx, i, val_preview(&self.stack[idx]));
+                        }
+                    }
+                }
 
                 if let Value::Object(oid) = &callable {
                     if let Some(bound) = self.bound_calls.get(&oid.index()).cloned() {
@@ -505,6 +533,14 @@ impl<'a> Plv3Vm<'a> {
 
             // ═══ MAKE_FUNC ══════════════════════════════════════
             55  => {
+                static MF: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                let mf = MF.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if mf == 0 {
+                    eprintln!("[make-func-0] PC={pc} stack_depth={}", self.stack.len());
+                    for i in 0..self.stack.len().min(35) {
+                        eprintln!("[make-func-0]   stack[{i}] = {}", val_preview(&self.stack[i]));
+                    }
+                }
                 let _param_count = self.reader.read_byte().unwrap_or(0);
                 let capture_count = self.reader.read_byte().unwrap_or(0);
                 let mut captures = Vec::with_capacity(capture_count as usize);
@@ -651,15 +687,17 @@ impl<'a> Plv3Vm<'a> {
     // ════════════════════════════════════════════════════════════════
 
     fn get_reg(&self, r: u16) -> Value {
-        self.regs.get(r as usize).cloned().unwrap_or(Value::Undefined)
+        // PLV3 "registers" are direct stack indices: A[g]
+        self.stack.get(r as usize).cloned().unwrap_or(Value::Undefined)
     }
 
     fn set_reg(&mut self, r: u16, v: Value) {
+        // PLV3 "registers" are direct stack indices: A[g] = v
         let idx = r as usize;
-        if idx >= self.regs.len() {
-            self.regs.resize(idx + 1, Value::Undefined);
+        while self.stack.len() <= idx {
+            self.stack.push(Value::Undefined);
         }
-        self.regs[idx] = v;
+        self.stack[idx] = v;
     }
 
     fn get_frame(&self, f: u16) -> Value {
@@ -746,7 +784,13 @@ impl<'a> Plv3Vm<'a> {
                         }).collect();
                         eprintln!("[closure-call] #{cc} body={} argc={} args=[{}]", pc as usize, args.len(), arg_preview.join(", "));
                     }
-                    return self.call_plv3_closure(pc as usize, args, hook);
+                    let result = self.call_plv3_closure(pc as usize, args, hook)?;
+                    static CR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                    let cr = CR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if cr < 10 || cr % 100 == 0 {
+                        eprintln!("[closure-ret] #{cr} body={} → {}", pc as usize, val_preview(&result));
+                    }
+                    return Ok(result);
                 }
 
                 // Resolve name: check __name__ property, or reverse-lookup from global
@@ -964,6 +1008,17 @@ fn strict_eq(a: &Value, b: &Value) -> bool {
         (Value::Undefined, Value::Undefined) => true,
         (Value::Object(x), Value::Object(y)) => x == y,
         _ => false,
+    }
+}
+
+fn val_preview(v: &Value) -> String {
+    match v {
+        Value::Number(n) => format!("{n}"),
+        Value::String(s) => format!("\"{}\"", &s[..s.len().min(20)]),
+        Value::Object(oid) => format!("obj#{}", oid.index()),
+        Value::Undefined => "undef".into(),
+        Value::Bool(b) => format!("{b}"),
+        _ => format!("{v:?}"),
     }
 }
 
