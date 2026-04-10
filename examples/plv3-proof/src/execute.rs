@@ -113,34 +113,24 @@ pub fn extract_keys(module: &Module) -> ExtractedKeys {
     let completed = match interp.run() {
         Ok(()) => true,
         Err(err) => {
-            // Print info about where execution stopped
-            let cursor = interp.state.cursor;
-            if let Some(func) = module.function_by_id(cursor.function) {
-                if let Some(block) = func.block(cursor.block) {
-                    eprintln!("[key-extract] stopped at block '{}' ({}), {} instructions in block",
-                        block.label, block.id, block.body.len());
-                    eprintln!("[key-extract] terminator: {}", block.terminator);
-                }
-            }
             eprintln!("[key-extract] execution stopped: {err}");
             false
         }
     };
 
-    let instructions_executed = interp.state.instruction_count;
-
-    // Print call trace
-    let call_events: Vec<_> = interp.trace.events()
-        .filter(|e| matches!(e, vm_engine_core::exec::trace::TraceEvent::CallEnter { .. } | vm_engine_core::exec::trace::TraceEvent::CallReturn { .. }))
-        .collect();
-    if !call_events.is_empty() {
-        eprintln!("[key-extract] call trace ({} events):", call_events.len());
-        for event in call_events.iter().take(20) {
-            eprintln!("  {event:?}");
+    // Concise halt diagnostic
+    {
+        let cursor = interp.state.cursor;
+        if let Some(func) = module.function_by_id(cursor.function) {
+            if let Some(block) = func.block(cursor.block) {
+                let has_keys = !btoa_captures.lock().unwrap().is_empty();
+                eprintln!("[key-extract] halted: block='{}', {} instrs, keys_found={}",
+                    block.label, interp.state.instruction_count, has_keys);
+            }
         }
-    } else {
-        eprintln!("[key-extract] no call events recorded");
     }
+
+    let instructions_executed = interp.state.instruction_count;
 
     // Extract keys from captured btoa inputs
     let btoa_inputs = btoa_captures.lock().unwrap();

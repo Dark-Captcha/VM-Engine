@@ -80,6 +80,28 @@ pub fn install_globals(heap: &mut Heap, global: ObjectId) {
         }
     });
     heap.set_property(global, "parseFloat", Value::Object(parse_float));
+
+    // Uint8Array constructor: new Uint8Array(array) → returns a copy of the array
+    // Minimal implementation for PLV3 S-box initialization.
+    let uint8array_ctor = heap.alloc_native(|args, _heap| {
+        match args.first() {
+            Some(Value::Array(elements)) => {
+                // Clamp each element to u8 range
+                let clamped: Vec<Value> = elements.iter().map(|v| {
+                    let n = vm_engine_core::value::coerce::to_number(v) as u8;
+                    Value::number(n as f64)
+                }).collect();
+                Value::Array(clamped)
+            }
+            Some(Value::Number(n)) => {
+                // new Uint8Array(length) → zero-filled array
+                let len = *n as usize;
+                Value::Array(vec![Value::number(0.0); len])
+            }
+            _ => Value::Array(Vec::new()),
+        }
+    });
+    heap.set_property(global, "Uint8Array", Value::Object(uint8array_ctor));
 }
 
 // ============================================================================

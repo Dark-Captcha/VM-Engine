@@ -923,11 +923,13 @@ fn decode_region(
                 }
             }
 
-        let Some(opcode_byte) = reader.read_byte() else { break };
+        let Some(opcode_byte) = reader.read_byte() else {
+            break;
+        };
         stats.instructions_decoded += 1;
         let source = SourceLoc::with_opcode(absolute_pc, opcode_byte as u16);
 
-        // Check if this is a MAKE_FUNC that we've already decoded as a separate function
+        // Check if this is a MAKE_FUNC that we've already decoded as a separate function.
         if opcode_byte == 55 {
             let make_func_absolute_pc = absolute_pc;
             let param_count = reader.read_byte().unwrap_or(0);
@@ -935,7 +937,6 @@ fn decode_region(
             for _ in 0..capture_count { reader.read_byte(); }
 
             if let Some(func_name) = func_names.get(&make_func_absolute_pc) {
-                // Push the function name as a callable reference
                 let var = builder.emit_sourced(
                     OpCode::Const,
                     vec![Operand::Const(Value::string(func_name))],
@@ -943,7 +944,6 @@ fn decode_region(
                 );
                 sym_stack.push(var);
             } else {
-                // Unknown MAKE_FUNC (nested?) — push placeholder
                 let var = builder.emit_sourced(
                     OpCode::Const,
                     vec![Operand::Const(Value::string(format!(
@@ -952,6 +952,28 @@ fn decode_region(
                     source,
                 );
                 sym_stack.push(var);
+            }
+
+            // Consume the JMP_FWD (opcode 189) that follows MAKE_FUNC.
+            // Skip over the function body without terminating the block.
+            let next_abs_pc = block_start_pc + reader.position;
+            if reader.position < (region_bytecode.len() - base_pc)
+                && region_bytecode[next_abs_pc - base_pc] == 189
+            {
+                reader.read_byte(); // consume 189
+                let offset = reader.read_u16_be().unwrap_or(0) as usize;
+                reader.position += offset;
+
+                // Also store the function reference to a synthetic scope variable
+                // so it survives block boundaries. The PLV3 VM keeps it on the stack,
+                // but our block-based decoder clears the stack at boundaries.
+                if let Some(&func_var) = sym_stack.last() {
+                    let idx = func_names.len(); // unique per MAKE_FUNC
+                    builder.emit_void(OpCode::StoreScope, vec![
+                        Operand::Const(Value::string(format!("__func_ref_{make_func_absolute_pc}"))),
+                        Operand::Var(func_var),
+                    ]);
+                }
             }
             continue;
         }
@@ -1213,11 +1235,13 @@ fn dispatch_opcode(
             let offset = reader.read_u16_be().unwrap_or(0) as usize;
             let abs_after = absolute_pc + 3;
             let target = abs_after + offset;
-            if let Some(&cond_var) = sym_stack.last() {
-                let continue_block = get_or_create_block(abs_after, block_map, builder);
-                let target_block = get_or_create_block(target, block_map, builder);
-                builder.branch_if(cond_var, continue_block, target_block);
-            }
+            // Use stack_pop (not sym_stack.last()) so blocks starting with this
+            // opcode still get a branch terminator even with an empty stack.
+            let cond_var = sym_stack.last().copied()
+                .unwrap_or_else(|| stack_pop(sym_stack, builder));
+            let continue_block = get_or_create_block(abs_after, block_map, builder);
+            let target_block = get_or_create_block(target, block_map, builder);
+            builder.branch_if(cond_var, continue_block, target_block);
             jump_targets.push(abs_after);
             jump_targets.push(target);
             stats.branches += 1; *block_terminated = true;
@@ -1226,11 +1250,11 @@ fn dispatch_opcode(
             let offset = reader.read_u16_be().unwrap_or(0) as usize;
             let abs_after = absolute_pc + 3;
             let target = abs_after + offset;
-            if let Some(&cond_var) = sym_stack.last() {
-                let target_block = get_or_create_block(target, block_map, builder);
-                let continue_block = get_or_create_block(abs_after, block_map, builder);
-                builder.branch_if(cond_var, target_block, continue_block);
-            }
+            let cond_var = sym_stack.last().copied()
+                .unwrap_or_else(|| stack_pop(sym_stack, builder));
+            let target_block = get_or_create_block(target, block_map, builder);
+            let continue_block = get_or_create_block(abs_after, block_map, builder);
+            builder.branch_if(cond_var, target_block, continue_block);
             jump_targets.push(abs_after);
             jump_targets.push(target);
             stats.branches += 1; *block_terminated = true;

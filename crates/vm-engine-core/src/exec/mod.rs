@@ -377,6 +377,71 @@ impl<'m, H: Hook> Interpreter<'m, H> {
                             return Ok(Some(result));
                         }
 
+                // Handle meta-call patterns: __bind__, new
+                let call_name = if let Value::String(s) = &operand_value(0) { Some(s.clone()) } else { None };
+                if let Some(ref name) = call_name {
+                    match name.as_str() {
+                        "__bind__" => {
+                            // bind(func, this) → return the function reference (simplified)
+                            return Ok(Some(args.first().cloned().unwrap_or(Value::Undefined)));
+                        }
+                        "new" => {
+                            // new Constructor(args) → call constructor with new semantics
+                            let ctor_val = args.first().cloned().unwrap_or(Value::Undefined);
+                            let ctor_args = if args.len() > 1 { &args[1..] } else { &[] };
+
+                            // Try heap native constructor (Uint8Array, etc.)
+                            if let Value::Object(oid) = &ctor_val {
+                                if let Some(result) = self.state.heap.call(*oid, ctor_args) {
+                                    return Ok(Some(result));
+                                }
+                            }
+
+                            // Try resolving constructor as an IR function
+                            if let Value::String(ctor_name) = &ctor_val {
+                                if let Some(target) = self.module.function_by_name(ctor_name) {
+                                    let fid = target.id;
+                                    self.trace.record(TraceEvent::CallEnter {
+                                        func: fid,
+                                        arg_count: ctor_args.len(),
+                                    });
+
+                                    let mut return_cursor = self.state.cursor;
+                                    return_cursor.instruction += 1;
+                                    self.state.call_stack.push(CallFrame {
+                                        return_cursor,
+                                        scope_depth: self.state.scopes.len(),
+                                        locals: std::collections::HashMap::new(),
+                                    });
+
+                                    for (i, &param_var) in target.params.iter().enumerate() {
+                                        let arg_val = ctor_args.get(i).cloned().unwrap_or(Value::Undefined);
+                                        self.state.set_var(param_var, arg_val);
+                                    }
+
+                                    self.state.cursor = Cursor {
+                                        function: fid,
+                                        block: target.entry,
+                                        instruction: 0,
+                                    };
+                                    return Ok(None);
+                                }
+                            }
+                            // Fallback: return a new empty object
+                            let obj_id = self.state.heap.alloc();
+                            return Ok(Some(Value::Object(obj_id)));
+                        }
+                        _ => {} // fall through to normal dispatch
+                    }
+                }
+
+                // Try hook by call name
+                if let Some(ref name) = call_name {
+                    if let Some(result) = self.hook.on_call(name, args, &mut self.state.heap) {
+                        return Ok(Some(result));
+                    }
+                }
+
                 // Try calling a heap object (native/closure)
                 if let Value::Object(oid) = &operand_value(0)
                     && let Some(result) = self.state.heap.call(*oid, args) {
@@ -386,7 +451,7 @@ impl<'m, H: Hook> Interpreter<'m, H> {
                 // IR function call by FuncId or by name (for indirect calls via Var)
                 let resolved_target = if let Some(fid) = func_ref {
                     self.module.function_by_id(fid)
-                } else if let Value::String(name) = &operand_value(0) {
+                } else if let Some(ref name) = call_name {
                     self.module.function_by_name(name)
                 } else {
                     None
