@@ -28,15 +28,15 @@ pub fn simplify(stmts: &mut Vec<Stmt>) {
 fn simplify_stmt(stmt: &mut Stmt) {
     match stmt {
         Stmt::VarAssign { expr, .. } => {
-            *expr = simplify_expr(expr.clone());
+            take_and_simplify(expr);
         }
         Stmt::PropSet { obj, key, val } => {
-            *obj = simplify_expr(obj.clone());
-            *key = simplify_expr(key.clone());
-            *val = simplify_expr(val.clone());
+            take_and_simplify(obj);
+            take_and_simplify(key);
+            take_and_simplify(val);
         }
         Stmt::If { cond, then_body, else_body } => {
-            *cond = simplify_expr(cond.clone());
+            take_and_simplify(cond);
             simplify(then_body);
             if let Some(els) = else_body {
                 simplify(els);
@@ -46,27 +46,33 @@ fn simplify_stmt(stmt: &mut Stmt) {
             }
         }
         Stmt::While { cond, body } => {
-            *cond = simplify_expr(cond.clone());
+            take_and_simplify(cond);
             simplify(body);
         }
         Stmt::DoWhile { body, cond } => {
             simplify(body);
-            *cond = simplify_expr(cond.clone());
+            take_and_simplify(cond);
         }
         Stmt::Loop { body } => {
             simplify(body);
         }
         Stmt::Return(Some(expr)) => {
-            *expr = simplify_expr(expr.clone());
+            take_and_simplify(expr);
         }
         Stmt::Throw(expr) => {
-            *expr = simplify_expr(expr.clone());
+            take_and_simplify(expr);
         }
         Stmt::ExprStmt(expr) => {
-            *expr = simplify_expr(expr.clone());
+            take_and_simplify(expr);
         }
         _ => {}
     }
+}
+
+/// Take ownership of an expression, simplify it, and put it back — zero clones.
+fn take_and_simplify(expr: &mut Expr) {
+    let taken = std::mem::replace(expr, Expr::Unknown(String::new()));
+    *expr = simplify_expr(taken);
 }
 
 /// Simplify an expression. Returns a new (possibly simpler) expression.
@@ -114,9 +120,12 @@ pub fn simplify_expr(expr: Expr) -> Expr {
 
             // Double negation: !!x = x (for boolean context)
             if op == UnaryOp::LogicalNot
-                && let Expr::Unary { op: UnaryOp::LogicalNot, operand: inner } = &operand
+                && let Expr::Unary { op: UnaryOp::LogicalNot, .. } = &operand
             {
-                return *inner.clone();
+                // Destructure to take ownership without cloning
+                if let Expr::Unary { operand: inner, .. } = operand {
+                    return *inner;
+                }
             }
 
             Expr::Unary { op, operand: Box::new(operand) }

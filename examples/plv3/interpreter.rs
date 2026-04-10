@@ -439,7 +439,7 @@ impl<'a> Plv3Vm<'a> {
                 let this_obj = self.pop();
                 let wrapper = self.heap.alloc();
                 self.heap.set_property(wrapper, "__bound__", Value::bool(true));
-                self.bound_calls.insert(wrapper.0, BoundCall {
+                self.bound_calls.insert(wrapper.index(), BoundCall {
                     func: func.clone(),
                     this_obj,
                 });
@@ -452,7 +452,7 @@ impl<'a> Plv3Vm<'a> {
                 let callable = self.pop();
 
                 if let Value::Object(oid) = &callable {
-                    if let Some(bound) = self.bound_calls.get(&oid.0).cloned() {
+                    if let Some(bound) = self.bound_calls.get(&oid.index()).cloned() {
                         // Bound call: grab argc args from stack, call func.apply(this, args)
                         let mut args = Vec::with_capacity(argc);
                         for _ in 0..argc { args.push(self.pop()); }
@@ -481,7 +481,7 @@ impl<'a> Plv3Vm<'a> {
                 let callable = self.pop();
 
                 if let Value::Object(oid) = &callable {
-                    if let Some(bound) = self.bound_calls.get(&oid.0).cloned() {
+                    if let Some(bound) = self.bound_calls.get(&oid.index()).cloned() {
                         let mut args = Vec::with_capacity(argc);
                         for _ in 0..argc { args.push(self.pop()); }
                         args.reverse();
@@ -739,7 +739,7 @@ impl<'a> Plv3Vm<'a> {
                         let arg_preview: Vec<String> = args.iter().take(8).map(|a| match a {
                             Value::Number(n) => format!("{n}"),
                             Value::String(s) => format!("\"{s}\""),
-                            Value::Object(oid) => format!("obj#{}", oid.0),
+                            Value::Object(oid) => format!("obj#{}", oid.index()),
                             Value::Undefined => "undef".into(),
                             Value::Bool(b) => format!("{b}"),
                             _ => format!("{a:?}"),
@@ -772,7 +772,7 @@ impl<'a> Plv3Vm<'a> {
                 static NF: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
                 let nf = NF.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if nf < 20 {
-                    eprintln!("[native-FAIL] {name_str} oid={} not callable, args={}", oid.0, args.len());
+                    eprintln!("[native-FAIL] {name_str} oid={} not callable, args={}", oid.index(), args.len());
                 }
 
                 Ok(Value::Undefined)

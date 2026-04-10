@@ -146,7 +146,7 @@ pub fn extract_keys(module: &Module) -> ExtractedKeys {
             // Find instruction that produces Var(15088)
             if let Some(entry) = func.blocks.first() {
                 for (i, instr) in entry.body.iter().enumerate() {
-                    if instr.result == Some(vm_engine::ir::Var(15088)) {
+                    if instr.result.map(|v| v.index()) == Some(15088) {
                         eprintln!("[key-extract] Var(15088) produced by instr #{i}: {} {:?}",
                             instr.op, instr.operands);
                         // Also show 3 preceding instructions

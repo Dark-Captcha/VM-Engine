@@ -17,8 +17,15 @@ use std::fmt;
 // ============================================================================
 
 /// Handle to a heap-allocated object in the executor.
+///
+/// Created by [`crate::exec::heap::Heap::alloc`] — not constructible by users.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ObjectId(pub u32);
+pub struct ObjectId(pub(crate) u32);
+
+impl ObjectId {
+    /// Raw numeric index (for serialization/debugging).
+    pub fn index(self) -> u32 { self.0 }
+}
 
 impl fmt::Display for ObjectId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -27,8 +34,15 @@ impl fmt::Display for ObjectId {
 }
 
 /// Handle to a closure stored in the executor runtime.
+///
+/// Created internally — not constructible by users.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ClosureId(pub u32);
+pub struct ClosureId(pub(crate) u32);
+
+impl ClosureId {
+    /// Raw numeric index (for serialization/debugging).
+    pub fn index(self) -> u32 { self.0 }
+}
 
 impl fmt::Display for ClosureId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

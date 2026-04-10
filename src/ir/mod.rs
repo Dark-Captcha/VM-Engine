@@ -23,8 +23,15 @@ pub use operand::{Operand, SourceLoc};
 // ============================================================================
 
 /// SSA variable. Each instruction that produces a value defines a fresh Var.
+///
+/// Created by [`builder::IrBuilder`] — not constructible by users.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Var(pub u32);
+pub struct Var(pub(crate) u32);
+
+impl Var {
+    /// Raw numeric index (for serialization/debugging).
+    pub fn index(self) -> u32 { self.0 }
+}
 
 impl fmt::Display for Var {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -33,8 +40,15 @@ impl fmt::Display for Var {
 }
 
 /// Basic block identifier within a function.
+///
+/// Created by [`builder::IrBuilder`] — not constructible by users.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BlockId(pub u32);
+pub struct BlockId(pub(crate) u32);
+
+impl BlockId {
+    /// Raw numeric index (for serialization/debugging).
+    pub fn index(self) -> u32 { self.0 }
+}
 
 impl fmt::Display for BlockId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -43,8 +57,15 @@ impl fmt::Display for BlockId {
 }
 
 /// Function identifier within a module.
+///
+/// Created by [`builder::IrBuilder`] — not constructible by users.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FuncId(pub u32);
+pub struct FuncId(pub(crate) u32);
+
+impl FuncId {
+    /// Raw numeric index (for serialization/debugging).
+    pub fn index(self) -> u32 { self.0 }
+}
 
 impl fmt::Display for FuncId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
