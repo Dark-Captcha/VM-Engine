@@ -99,8 +99,8 @@ pub fn extract_keys(module: &Module) -> ExtractedKeys {
     // Limit execution to prevent infinite loops
     interp.set_max_instructions(5_000_000);
 
-    // Enable tracing to see what's happening
-    interp.trace.enable(1000);
+    // Enable tracing for calls
+    interp.trace.enable(5000);
     interp.trace.set_filter(vm_engine_core::exec::trace::TraceFilter {
         include_steps: false,
         include_var_writes: false,
@@ -118,14 +118,26 @@ pub fn extract_keys(module: &Module) -> ExtractedKeys {
         }
     };
 
-    // Concise halt diagnostic
+    // Halt diagnostic
     {
         let cursor = interp.state.cursor;
+        let func_name = module.function_by_id(cursor.function).map(|f| f.name.as_str()).unwrap_or("?");
+        let block_label = module.function_by_id(cursor.function)
+            .and_then(|f| f.block(cursor.block))
+            .map(|b| b.label.as_str()).unwrap_or("?");
+        let has_keys = !btoa_captures.lock().unwrap().is_empty();
+        let call_count = interp.trace.events()
+            .filter(|e| matches!(e, vm_engine_core::exec::trace::TraceEvent::CallEnter { .. }))
+            .count();
+        let json_count = json_captures.lock().unwrap().len();
+        let btoa_count = btoa_captures.lock().unwrap().len();
+        eprintln!("[key-extract] halted: func={func_name}, block={block_label}, {} instrs, {call_count} calls, {json_count} json, {btoa_count} btoa, keys={has_keys}",
+            interp.state.instruction_count);
+
+        // Print entry block size
         if let Some(func) = module.function_by_id(cursor.function) {
-            if let Some(block) = func.block(cursor.block) {
-                let has_keys = !btoa_captures.lock().unwrap().is_empty();
-                eprintln!("[key-extract] halted: block='{}', {} instrs, keys_found={}",
-                    block.label, interp.state.instruction_count, has_keys);
+            if let Some(entry) = func.blocks.first() {
+                eprintln!("[key-extract] entry_block: {} instrs, term: {}", entry.body.len(), entry.terminator);
             }
         }
     }

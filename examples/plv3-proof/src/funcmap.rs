@@ -128,9 +128,15 @@ fn skip_operands(opcode: u8, reader: &mut Plv3Reader<'_>) {
         }
 
         // 2g
-        232 | 32 | 245 | 174 | 114 | 151 | 168 | 115 | 150 => {
+        232 | 32 | 245 | 174 | 114 | 151 | 168 | 115 => {
             reader.read_u16_be();
             reader.read_u16_be();
+        }
+
+        // 1g + 1i (opcode 150 = PUSH_REG_IMM: push reg, push typed immediate)
+        150 => {
+            reader.read_u16_be();
+            reader.read_typed_value();
         }
 
         // 3g

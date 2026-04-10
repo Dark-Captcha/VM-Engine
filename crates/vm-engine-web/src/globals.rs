@@ -81,24 +81,47 @@ pub fn install_globals(heap: &mut Heap, global: ObjectId) {
     });
     heap.set_property(global, "parseFloat", Value::Object(parse_float));
 
-    // Uint8Array constructor: new Uint8Array(array) → returns a copy of the array
-    // Minimal implementation for PLV3 S-box initialization.
-    let uint8array_ctor = heap.alloc_native(|args, _heap| {
+    // Uint8Array constructor: new Uint8Array(array_or_length) → Uint8Array-like object
+    // Handles both Value::Array and heap-allocated Object arrays (from COLLECT opcode).
+    let uint8array_ctor = heap.alloc_native(|args, heap| {
         match args.first() {
             Some(Value::Array(elements)) => {
-                // Clamp each element to u8 range
-                let clamped: Vec<Value> = elements.iter().map(|v| {
+                let result = heap.alloc();
+                for (i, v) in elements.iter().enumerate() {
                     let n = vm_engine_core::value::coerce::to_number(v) as u8;
-                    Value::number(n as f64)
-                }).collect();
-                Value::Array(clamped)
+                    heap.set_property(result, &i.to_string(), Value::number(n as f64));
+                }
+                heap.set_property(result, "length", Value::number(elements.len() as f64));
+                Value::Object(result)
+            }
+            Some(Value::Object(src_oid)) => {
+                // Read from heap object (array created by COLLECT → NewArray on heap)
+                let len = vm_engine_core::value::coerce::to_number(
+                    &heap.get_property(*src_oid, "length")
+                ) as usize;
+                let result = heap.alloc();
+                for i in 0..len {
+                    let v = heap.get_property(*src_oid, &i.to_string());
+                    let n = vm_engine_core::value::coerce::to_number(&v) as u8;
+                    heap.set_property(result, &i.to_string(), Value::number(n as f64));
+                }
+                heap.set_property(result, "length", Value::number(len as f64));
+                Value::Object(result)
             }
             Some(Value::Number(n)) => {
-                // new Uint8Array(length) → zero-filled array
                 let len = *n as usize;
-                Value::Array(vec![Value::number(0.0); len])
+                let result = heap.alloc();
+                for i in 0..len {
+                    heap.set_property(result, &i.to_string(), Value::number(0.0));
+                }
+                heap.set_property(result, "length", Value::number(len as f64));
+                Value::Object(result)
             }
-            _ => Value::Array(Vec::new()),
+            _ => {
+                let result = heap.alloc();
+                heap.set_property(result, "length", Value::number(0.0));
+                Value::Object(result)
+            }
         }
     });
     heap.set_property(global, "Uint8Array", Value::Object(uint8array_ctor));

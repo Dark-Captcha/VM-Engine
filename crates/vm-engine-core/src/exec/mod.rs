@@ -360,7 +360,10 @@ impl<'m, H: Hook> Interpreter<'m, H> {
                 Ok(Some(Value::Object(oid)))
             }
             OpCode::NewArray => {
-                Ok(Some(Value::Array(Vec::new())))
+                // Allocate on heap so StoreProp can populate elements
+                let oid = self.state.heap.alloc();
+                self.state.heap.set_property(oid, "length", Value::number(0.0));
+                Ok(Some(Value::Object(oid)))
             }
 
             // ── Control ──────────────────────────────────────────
@@ -369,6 +372,7 @@ impl<'m, H: Hook> Interpreter<'m, H> {
                     if let Operand::Func(fid) = o { Some(*fid) } else { None }
                 });
                 let args = &vals[1..];
+
 
                 // Try hook first (by function name)
                 if let Some(fid) = func_ref
