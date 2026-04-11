@@ -52,9 +52,13 @@ impl<'a> Plv3Reader<'a> {
         }
 
         match tag {
+            // This bytecode uses different tags than the vm_module.js source.
+            // These tag values were determined empirically from the actual bytecode.
             38 => Some(Value::bool(true)),
-            107 => Some(Value::bool(false)), // also used for null in some versions
-            98 => Some(Value::Undefined),
+            107 => Some(Value::bool(false)),
+            // Tag 98 is NULL in this bytecode version.
+            // Treating as NULL (coerces to 0 in arithmetic) matches PLV3 semantics.
+            98 => Some(Value::Null),
 
             // ASCII string: XOR-decoded with incrementing key starting at 27
             63 => {
@@ -130,7 +134,7 @@ impl<'a> Plv3Reader<'a> {
                 Some(Value::number((byte as i8) as f64))
             }
 
-            // Unknown tag
+            // Unknown tag - return as number (fallback)
             _ => Some(Value::number(tag as f64)),
         }
     }
@@ -165,7 +169,7 @@ mod tests {
 
     #[test]
     fn read_ascii_string() {
-        // Encode "Hi" with XOR key starting at 27
+        // Tag 63, XOR key starting at 27
         let h_encoded = b'H' ^ 27u8;
         let i_encoded = b'i' ^ 28u8;
         let terminator = 0u8 ^ 29u8;
@@ -183,7 +187,7 @@ mod tests {
 
     #[test]
     fn read_int16() {
-        // -1 as int16: 0xFF 0xFF
+        // Tag 123 for int16, -1 as int16: 0xFF 0xFF
         let mut reader = Plv3Reader::new(&[123, 0xFF, 0xFF]);
         let value = reader.read_typed_value().unwrap();
         assert_eq!(value, Value::number(-1.0));

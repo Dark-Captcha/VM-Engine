@@ -16,15 +16,17 @@ use crate::value::coerce;
 pub fn install_string_utils(heap: &mut Heap, global: ObjectId) {
     let string_obj = heap.alloc();
 
+    // fromCharCode: truncate to u16 (UTF-16 code unit), per ECMAScript spec
     let from_char_code = heap.alloc_native(|args, _heap| {
         let result: String = args.iter()
-            .map(|arg| coerce::to_number(arg) as u32)
-            .filter_map(char::from_u32)
+            .map(|arg| (coerce::to_number(arg) as u32) & 0xFFFF) // Truncate to u16
+            .filter_map(|n| char::from_u32(n))
             .collect();
         Value::string(result)
     });
     heap.set_property(string_obj, "fromCharCode", Value::Object(from_char_code));
 
+    // fromCodePoint: use full u32 code point, per ECMAScript spec
     let from_code_point = heap.alloc_native(|args, _heap| {
         let result: String = args.iter()
             .map(|arg| coerce::to_number(arg) as u32)

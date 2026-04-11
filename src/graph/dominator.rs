@@ -27,11 +27,18 @@ pub struct DominatorTree {
 impl DominatorTree {
     /// Does block `a` dominate block `b`?
     ///
-    /// A block dominates itself. A block dominates B if it is on every path
-    /// from the entry to B.
+    /// A block dominates itself (reflexive). `a` dominates `b` if `a` is on
+    /// every path from the entry to `b`.
+    ///
+    /// Returns `false` for unreachable blocks (they're not in the idom map).
+    /// To distinguish "b is unreachable" from "a does not dominate b", use
+    /// [`is_reachable`].
+    ///
+    /// [`is_reachable`]: Self::is_reachable
     pub fn dominates(&self, a: BlockId, b: BlockId) -> bool {
         if a == b {
-            return true;
+            // Reflexive dominance only holds if b is reachable from entry.
+            return self.is_reachable(b);
         }
         let mut cur = b;
         while let Some(&parent) = self.idom.get(&cur) {
@@ -44,6 +51,11 @@ impl DominatorTree {
             cur = parent;
         }
         false
+    }
+
+    /// True if `block` is reachable from the entry block.
+    pub fn is_reachable(&self, block: BlockId) -> bool {
+        block == self.entry || self.idom.contains_key(&block)
     }
 
     /// All blocks dominated by `a` (including `a` itself).

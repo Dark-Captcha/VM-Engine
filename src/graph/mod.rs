@@ -68,6 +68,37 @@ impl Cfg {
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
     }
+
+    /// Compute the set of blocks reachable from the entry block.
+    ///
+    /// Useful for:
+    /// - Detecting dead code
+    /// - Pruning unreachable blocks from analysis
+    /// - Avoiding dominator undefined behavior on isolated components
+    pub fn reachable_blocks(&self) -> std::collections::BTreeSet<BlockId> {
+        let mut reachable = std::collections::BTreeSet::new();
+        let mut queue = vec![self.entry];
+        while let Some(block_id) = queue.pop() {
+            if !reachable.insert(block_id) {
+                continue;
+            }
+            for edge in &self.edges {
+                if edge.from == block_id && !reachable.contains(&edge.to) {
+                    queue.push(edge.to);
+                }
+            }
+        }
+        reachable
+    }
+
+    /// List blocks that are not reachable from the entry.
+    pub fn unreachable_blocks(&self) -> Vec<BlockId> {
+        let reachable = self.reachable_blocks();
+        self.blocks.iter()
+            .map(|b| b.id)
+            .filter(|id| !reachable.contains(id))
+            .collect()
+    }
 }
 
 // ============================================================================
@@ -252,5 +283,30 @@ mod tests {
         // header → body (true), header → exit (false), body → header (back)
         assert_eq!(cfg.edges.len(), 3);
         assert!(cfg.predecessors(header).contains(&body)); // back edge
+    }
+
+    #[test]
+    fn detect_unreachable_blocks() {
+        let mut b = IrBuilder::new();
+        b.begin_function("orphan_test");
+        let entry = b.create_and_switch("entry");
+        // Create an orphan block that's never connected
+        let orphan = b.create_block("orphan");
+        b.switch_to(orphan);
+        b.halt();
+        // Entry halts without ever jumping to orphan
+        b.switch_to(entry);
+        b.halt();
+        b.end_function();
+
+        let module = b.build();
+        let cfg = build_cfg(&module.functions[0]);
+
+        let reachable = cfg.reachable_blocks();
+        assert!(reachable.contains(&entry));
+        assert!(!reachable.contains(&orphan));
+
+        let unreachable = cfg.unreachable_blocks();
+        assert_eq!(unreachable, vec![orphan]);
     }
 }

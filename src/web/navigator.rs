@@ -65,6 +65,79 @@ pub fn install_navigator(heap: &mut Heap, global: ObjectId, config: &NavigatorCo
     let languages = Value::Array(config.languages.iter().map(Value::string).collect());
     heap.set_property(navigator, "languages", languages);
 
+    // Additional properties fingerprinted by anti-bots
+    heap.set_property(navigator, "appName", Value::string("Netscape"));
+    heap.set_property(navigator, "appVersion", Value::string("5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"));
+    heap.set_property(navigator, "product", Value::string("Gecko"));
+    heap.set_property(navigator, "productSub", Value::string("20030107"));
+    heap.set_property(navigator, "appCodeName", Value::string("Mozilla"));
+    heap.set_property(navigator, "doNotTrack", Value::Null);
+    heap.set_property(navigator, "deviceMemory", Value::number(8.0));
+
+    // Plugin and mime type stubs
+    let plugins = heap.alloc();
+    heap.set_property(plugins, "length", Value::number(5.0));
+    heap.set_property(navigator, "plugins", Value::Object(plugins));
+
+    let mime_types = heap.alloc();
+    heap.set_property(mime_types, "length", Value::number(4.0));
+    heap.set_property(navigator, "mimeTypes", Value::Object(mime_types));
+
+    // Permissions stub
+    let permissions = heap.alloc();
+    let permissions_query = heap.alloc_native(|_args, heap| {
+        // Return a Promise-like object with state: "prompt"
+        let result = heap.alloc();
+        heap.set_property(result, "state", Value::string("prompt"));
+        let then_fn = heap.alloc_native(|callback_args, heap| {
+            if let Some(Value::Object(callback)) = callback_args.first() {
+                let perm_status = heap.alloc();
+                heap.set_property(perm_status, "state", Value::string("prompt"));
+                let _ = heap.call(*callback, &[Value::Object(perm_status)]);
+            }
+            Value::Undefined
+        });
+        heap.set_property(result, "then", Value::Object(then_fn));
+        Value::Object(result)
+    });
+    heap.set_property(permissions, "query", Value::Object(permissions_query));
+    heap.set_property(navigator, "permissions", Value::Object(permissions));
+
+    // Geolocation stub
+    let geolocation = heap.alloc();
+    let get_current_position = heap.alloc_native(|_args, _heap| {
+        // No-op - would need async support for real implementation
+        Value::Undefined
+    });
+    heap.set_property(geolocation, "getCurrentPosition", Value::Object(get_current_position));
+    heap.set_property(navigator, "geolocation", Value::Object(geolocation));
+
+    // MediaDevices stub
+    let media_devices = heap.alloc();
+    let enumerate_devices = heap.alloc_native(|_args, heap| {
+        // Return empty array wrapped in Promise-like
+        let result = heap.alloc();
+        let then_fn = heap.alloc_native(|callback_args, heap| {
+            if let Some(Value::Object(callback)) = callback_args.first() {
+                let _ = heap.call(*callback, &[Value::Array(vec![])]);
+            }
+            Value::Undefined
+        });
+        heap.set_property(result, "then", Value::Object(then_fn));
+        Value::Object(result)
+    });
+    heap.set_property(media_devices, "enumerateDevices", Value::Object(enumerate_devices));
+    heap.set_property(navigator, "mediaDevices", Value::Object(media_devices));
+
+    // ServiceWorker stub (container object)
+    let service_worker = heap.alloc();
+    heap.set_property(service_worker, "controller", Value::Null);
+    heap.set_property(navigator, "serviceWorker", Value::Object(service_worker));
+
+    // Credentials stub
+    let credentials = heap.alloc();
+    heap.set_property(navigator, "credentials", Value::Object(credentials));
+
     heap.set_property(global, "navigator", Value::Object(navigator));
 }
 

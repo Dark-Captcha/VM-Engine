@@ -119,6 +119,58 @@ pub fn install_document(heap: &mut Heap, global: ObjectId, config: &DocumentConf
     heap.set_property(document, "hidden", Value::bool(false));
     heap.set_property(document, "visibilityState", Value::string("visible"));
 
+    // Additional properties fingerprinted by anti-bots
+    heap.set_property(document, "domain", Value::string(&config.location_hostname));
+    heap.set_property(document, "URL", Value::string(&config.location_href));
+    heap.set_property(document, "documentURI", Value::string(&config.location_href));
+    heap.set_property(document, "charset", Value::string(&config.character_set));
+    heap.set_property(document, "contentType", Value::string("text/html"));
+
+    // document.head
+    let head = heap.alloc();
+    heap.set_property(document, "head", Value::Object(head));
+
+    // document.forms, images, links — empty collections
+    let forms = heap.alloc();
+    heap.set_property(forms, "length", Value::number(0.0));
+    heap.set_property(document, "forms", Value::Object(forms));
+
+    let images = heap.alloc();
+    heap.set_property(images, "length", Value::number(0.0));
+    heap.set_property(document, "images", Value::Object(images));
+
+    let links = heap.alloc();
+    heap.set_property(links, "length", Value::number(0.0));
+    heap.set_property(document, "links", Value::Object(links));
+
+    // document.currentScript
+    heap.set_property(document, "currentScript", Value::Null);
+
+    // document.addEventListener/removeEventListener
+    let doc_add_event = heap.alloc_native(|_args, _heap| Value::Undefined);
+    heap.set_property(document, "addEventListener", Value::Object(doc_add_event));
+    let doc_remove_event = heap.alloc_native(|_args, _heap| Value::Undefined);
+    heap.set_property(document, "removeEventListener", Value::Object(doc_remove_event));
+
+    // document.getElementById
+    let get_element_by_id = heap.alloc_native(|_args, _heap| Value::Null);
+    heap.set_property(document, "getElementById", Value::Object(get_element_by_id));
+
+    // document.getElementsByClassName / getElementsByTagName — return empty array-like
+    let get_elements_by_class = heap.alloc_native(|_args, heap| {
+        let result = heap.alloc();
+        heap.set_property(result, "length", Value::number(0.0));
+        Value::Object(result)
+    });
+    heap.set_property(document, "getElementsByClassName", Value::Object(get_elements_by_class));
+
+    let get_elements_by_tag = heap.alloc_native(|_args, heap| {
+        let result = heap.alloc();
+        heap.set_property(result, "length", Value::number(0.0));
+        Value::Object(result)
+    });
+    heap.set_property(document, "getElementsByTagName", Value::Object(get_elements_by_tag));
+
     heap.set_property(global, "document", Value::Object(document));
 
     // Also expose location directly on global (common JS pattern)

@@ -39,6 +39,10 @@ pub struct Interpreter<'m, H: Hook = NullHook> {
     pub hook: H,
     breakpoints: Vec<Breakpoint>,
     max_instructions: u64,
+    /// Per-instance counter for unhandled calls (was a static before — caused cross-instance bleed).
+    unhandled_call_count: usize,
+    /// If true, unresolved Call instructions return an error instead of silently returning Undefined.
+    strict_calls: bool,
 }
 
 impl<'m> Interpreter<'m, NullHook> {
@@ -61,6 +65,8 @@ impl<'m, H: Hook> Interpreter<'m, H> {
             hook,
             breakpoints: Vec::new(),
             max_instructions: 10_000_000,
+            unhandled_call_count: 0,
+            strict_calls: false,
         })
     }
 
@@ -79,6 +85,17 @@ impl<'m, H: Hook> Interpreter<'m, H> {
     /// Set the maximum number of instructions before forced halt.
     pub fn set_max_instructions(&mut self, n: u64) {
         self.max_instructions = n;
+    }
+
+    /// Enable strict call mode. When enabled, calls to unresolved functions return
+    /// an error instead of silently returning `Undefined`.
+    pub fn set_strict_calls(&mut self, strict: bool) {
+        self.strict_calls = strict;
+    }
+
+    /// Returns the number of unhandled calls encountered (resolved to Undefined).
+    pub fn unhandled_call_count(&self) -> usize {
+        self.unhandled_call_count
     }
 
     /// Add a breakpoint.
@@ -131,18 +148,26 @@ impl<'m, H: Hook> Interpreter<'m, H> {
             .map(|op| self.resolve_operand(op))
             .collect();
 
+        let instr_result = instr.result;
+        let instr_op = instr.op;
+        // Clone operands to detach from the immutable borrow of `block`.
+        let operands = instr.operands.clone();
+
         // Execute
-        let result = self.exec_op(instr.op, &operand_vals, &instr.operands)?;
+        let result = self.exec_op(instr_op, &operand_vals, &operands, instr_result)?;
 
         // Store result
-        if let Some(var) = instr.result
+        if let Some(var) = instr_result
             && let Some(val) = result {
                 self.state.set_var(var, val.clone());
                 self.trace.record(TraceEvent::VarWrite { var, value: val });
             }
 
-        // Advance
-        self.state.cursor.instruction += 1;
+        // Advance (if cursor wasn't already changed by a Call)
+        // Calls mutate cursor directly to enter the callee — don't advance past them.
+        if self.state.cursor == cursor {
+            self.state.cursor.instruction += 1;
+        }
         Ok(true)
     }
 
@@ -189,6 +214,7 @@ impl<'m, H: Hook> Interpreter<'m, H> {
         op: OpCode,
         vals: &[Value],
         operands: &[Operand],
+        result_var: Option<crate::ir::Var>,
     ) -> Result<Option<Value>> {
         let operand_value = |i: usize| vals.get(i).cloned().unwrap_or(Value::Undefined);
 
@@ -292,8 +318,9 @@ impl<'m, H: Hook> Interpreter<'m, H> {
                 }
             }
             OpCode::HasProp => {
-                if let Value::Object(oid) = &operand_value(1) {
-                    let key = coerce::to_string(&operand_value(0));
+                // Consistent with LoadProp/StoreProp: (obj, key)
+                if let Value::Object(oid) = &operand_value(0) {
+                    let key = coerce::to_string(&operand_value(1));
                     Ok(Some(Value::bool(self.state.heap.has_property(*oid, &key))))
                 } else {
                     Ok(Some(Value::bool(false)))
@@ -414,6 +441,7 @@ impl<'m, H: Hook> Interpreter<'m, H> {
                                     return_cursor.instruction += 1;
                                     self.state.call_stack.push(CallFrame {
                                         return_cursor,
+                                        result_var,
                                         scope_depth: self.state.scopes.len(),
                                         locals: std::collections::HashMap::new(),
                                     });
@@ -471,6 +499,7 @@ impl<'m, H: Hook> Interpreter<'m, H> {
                     return_cursor.instruction += 1;
                     self.state.call_stack.push(CallFrame {
                         return_cursor,
+                        result_var,
                         scope_depth: self.state.scopes.len(),
                         locals: std::collections::HashMap::new(),
                     });
@@ -488,16 +517,29 @@ impl<'m, H: Hook> Interpreter<'m, H> {
                     return Ok(None);
                 }
 
-                // Trace: check callable var
-                {
-                    static UC: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-                    let c = UC.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if c < 3 {
-                        if let Some(Operand::Var(v)) = operands.first() {
-                            let val = self.state.get_var(*v);
-                            eprintln!("[unhandled] #{c}: Var({}) = {:?}", v.0,
-                                format!("{val:?}").chars().take(60).collect::<String>());
-                        }
+                // Unresolved call — surface an error if strict mode, else count + undefined
+                self.unhandled_call_count += 1;
+                if self.strict_calls {
+                    let ctx = operands.first()
+                        .map(|o| match o {
+                            Operand::Var(v) => format!("Var({})", v.0),
+                            Operand::Func(fid) => format!("Func({fid})"),
+                            Operand::Const(c) => format!("Const({c:?})"),
+                            Operand::Block(b) => format!("Block({b})"),
+                        })
+                        .unwrap_or_else(|| "<no operands>".into());
+                    return Err(Error::exec(format!(
+                        "unresolved Call instruction (target: {ctx})",
+                    )));
+                }
+                // Log first few for debugging (per-instance — no cross-interpreter leak)
+                if self.unhandled_call_count <= 3 {
+                    if let Some(Operand::Var(v)) = operands.first() {
+                        let val = self.state.get_var(*v);
+                        eprintln!("[unhandled-call] #{}: Var({}) = {:?}",
+                            self.unhandled_call_count,
+                            v.0,
+                            format!("{val:?}").chars().take(60).collect::<String>());
                     }
                 }
                 Ok(Some(Value::Undefined))
@@ -553,6 +595,7 @@ impl<'m, H: Hook> Interpreter<'m, H> {
                     .find(|(case_val, _)| val == *case_val)
                     .map(|(_, bid)| *bid)
                     .unwrap_or(*default);
+                self.state.previous_block = Some(current_block); // Fix: Phi nodes need this
                 self.state.cursor.block = target;
                 self.state.cursor.instruction = 0;
                 Ok(true)
@@ -569,17 +612,11 @@ impl<'m, H: Hook> Interpreter<'m, H> {
                     self.state.cursor = frame.return_cursor;
                     self.state.scopes.truncate(frame.scope_depth);
 
-                    // Store return value in the Call instruction's result var
-                    // The call instruction is at return_cursor - 1
-                    let call_func = self.module.function_by_id(self.state.cursor.function);
-                    if let Some(f) = call_func
-                        && let Some(block) = f.block(self.state.cursor.block) {
-                            let call_idx = self.state.cursor.instruction.saturating_sub(1);
-                            if let Some(instr) = block.body.get(call_idx)
-                                && let Some(var) = instr.result {
-                                    self.state.set_var(var, ret_val);
-                                }
-                        }
+                    // Store return value in the frame's result_var (safer than
+                    // guessing from cursor position).
+                    if let Some(var) = frame.result_var {
+                        self.state.set_var(var, ret_val);
+                    }
                     Ok(true)
                 } else {
                     // Top-level return — halt
@@ -881,5 +918,87 @@ mod tests {
         // The loaded value should be from the array
         // Note: this test verifies the concept; actual mutation semantics
         // may need refinement for pass-by-value Array
+    }
+
+    #[test]
+    fn has_prop_returns_true_for_existing_key() {
+        // Regression test: HasProp operand order was reversed.
+        // Correct order: (obj, key) — matching LoadProp/StoreProp.
+        let mut b = IrBuilder::new();
+        b.begin_function("main");
+        b.create_and_switch("entry");
+        let obj = b.new_object();       // Var(0)
+        let key = b.const_string("x");  // Var(1)
+        let val = b.const_number(42.0); // Var(2)
+        b.store_prop(obj, key, val);    // void
+        let exists = b.has_prop(obj, key); // Var(3)
+        b.ret(Some(exists));
+        b.end_function();
+
+        let module = b.build();
+        let mut interp = Interpreter::new(&module).unwrap();
+        interp.run().unwrap();
+
+        assert_eq!(interp.state.get_var(exists), Value::bool(true));
+    }
+
+    #[test]
+    fn has_prop_returns_false_for_missing_key() {
+        let mut b = IrBuilder::new();
+        b.begin_function("main");
+        b.create_and_switch("entry");
+        let obj = b.new_object();           // Var(0)
+        let key = b.const_string("missing"); // Var(1)
+        let exists = b.has_prop(obj, key);   // Var(2)
+        b.ret(Some(exists));
+        b.end_function();
+
+        let module = b.build();
+        let mut interp = Interpreter::new(&module).unwrap();
+        interp.run().unwrap();
+
+        assert_eq!(interp.state.get_var(exists), Value::bool(false));
+    }
+
+    #[test]
+    fn strict_call_mode_rejects_unresolved() {
+        let mut b = IrBuilder::new();
+        b.begin_function("main");
+        b.create_and_switch("entry");
+        // Create an unresolvable call via a Var that's not a function
+        let fn_var = b.const_number(42.0);
+        let _ = b.emit(OpCode::Call, vec![Operand::Var(fn_var)]);
+        b.halt();
+        b.end_function();
+
+        let module = b.build();
+        let mut interp = Interpreter::new(&module).unwrap();
+        interp.set_strict_calls(true);
+
+        let err = interp.run().unwrap_err();
+        assert!(err.to_string().contains("unresolved Call"));
+    }
+
+    #[test]
+    fn per_instance_unhandled_call_counter() {
+        // Regression: static counter leaked across instances
+        let mut b = IrBuilder::new();
+        b.begin_function("main");
+        b.create_and_switch("entry");
+        let fn_var = b.const_number(42.0);
+        let _ = b.emit(OpCode::Call, vec![Operand::Var(fn_var)]);
+        b.halt();
+        b.end_function();
+
+        let module = b.build();
+
+        let mut interp1 = Interpreter::new(&module).unwrap();
+        interp1.run().unwrap();
+        assert_eq!(interp1.unhandled_call_count(), 1);
+
+        // Second interpreter should start from 0, not inherit from interp1
+        let mut interp2 = Interpreter::new(&module).unwrap();
+        interp2.run().unwrap();
+        assert_eq!(interp2.unhandled_call_count(), 1);
     }
 }

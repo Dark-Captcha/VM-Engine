@@ -126,6 +126,21 @@ fn abstract_eq(a: &Value, b: &Value) -> bool {
         }
         (Value::Bool(_), _) => abstract_eq(&Value::number(coerce::to_number(a)), b),
         (_, Value::Bool(_)) => abstract_eq(a, &Value::number(coerce::to_number(b))),
+        // ECMAScript: ToPrimitive for arrays → toString then compare
+        (Value::Array(_), Value::Number(_) | Value::String(_)) => {
+            abstract_eq(&Value::string(coerce::to_string(a)), b)
+        }
+        (Value::Number(_) | Value::String(_), Value::Array(_)) => {
+            abstract_eq(a, &Value::string(coerce::to_string(b)))
+        }
+        // Object comparison with primitives
+        (Value::Object(_), Value::Number(_) | Value::String(_)) => {
+            // Objects coerce to "[object Object]" which rarely equals primitives
+            abstract_eq(&Value::string(coerce::to_string(a)), b)
+        }
+        (Value::Number(_) | Value::String(_), Value::Object(_)) => {
+            abstract_eq(a, &Value::string(coerce::to_string(b)))
+        }
         _ => false,
     }
 }
@@ -251,5 +266,41 @@ mod tests {
     fn shift_operators() {
         assert_eq!(binary(BinaryOp::Shl, &Value::number(1.0), &Value::number(8.0)), Value::number(256.0));
         assert_eq!(binary(BinaryOp::Shr, &Value::number(-256.0), &Value::number(4.0)), Value::number(-16.0));
+    }
+
+    #[test]
+    fn array_loose_equality() {
+        // [] == 0 ([] → "" → 0)
+        assert_eq!(
+            binary(BinaryOp::Eq, &Value::Array(vec![]), &Value::number(0.0)),
+            Value::bool(true)
+        );
+        // [0] == 0
+        assert_eq!(
+            binary(BinaryOp::Eq, &Value::Array(vec![Value::number(0.0)]), &Value::number(0.0)),
+            Value::bool(true)
+        );
+        // [] == ""
+        assert_eq!(
+            binary(BinaryOp::Eq, &Value::Array(vec![]), &Value::string("")),
+            Value::bool(true)
+        );
+        // [1,2] == "1,2"
+        assert_eq!(
+            binary(BinaryOp::Eq,
+                &Value::Array(vec![Value::number(1.0), Value::number(2.0)]),
+                &Value::string("1,2")
+            ),
+            Value::bool(true)
+        );
+    }
+
+    #[test]
+    fn array_strict_equality() {
+        // [] !== 0 (strict equality, no coercion)
+        assert_eq!(
+            binary(BinaryOp::StrictEq, &Value::Array(vec![]), &Value::number(0.0)),
+            Value::bool(false)
+        );
     }
 }

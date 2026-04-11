@@ -51,7 +51,14 @@ pub fn install_timing(heap: &mut Heap, global: ObjectId, config: &TimingConfig) 
     let date_tick = config.date_now_tick_ms;
     let perf_tick = config.performance_now_tick_ms;
 
-    // Date.now()
+    // Date.now() — advances monotonically, returns value after advance.
+    //
+    // NOTE: This differs from real browser Date.now() semantics (which returns
+    // the current wall clock without "advancing"), but PLV3-style anti-bot VMs
+    // rely on this behavior: successive calls must return monotonically
+    // increasing values, and often the first call is expected to be
+    // start + tick (not exactly start). Reverting to spec-strict semantics
+    // breaks PLV3 token generation.
     let date_now_fn = heap.alloc_closure(move |_args, heap| {
         let current = heap.get_property(global, "__timing_date_ms")
             .as_number().unwrap_or(0.0);
@@ -63,7 +70,7 @@ pub fn install_timing(heap: &mut Heap, global: ObjectId, config: &TimingConfig) 
     heap.set_property(date_object, "now", Value::Object(date_now_fn));
     heap.set_property(global, "Date", Value::Object(date_object));
 
-    // performance.now()
+    // performance.now() — advances monotonically (see Date.now() note)
     let perf_now_fn = heap.alloc_closure(move |_args, heap| {
         let current = heap.get_property(global, "__timing_perf_ms")
             .as_number().unwrap_or(0.0);
@@ -150,6 +157,6 @@ mod tests {
         let now = heap.get_property(date, "now").as_object().unwrap();
 
         let first = heap.call(now, &[]).unwrap().as_number().unwrap();
-        assert_eq!(first, 5100.0); // 5000 + 100
+        assert_eq!(first, 5100.0); // 5000 + 100 (first call advances)
     }
 }

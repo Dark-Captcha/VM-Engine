@@ -100,12 +100,12 @@ pub fn detect_loops(cfg: &Cfg, dom: &DominatorTree) -> LoopForest {
     for &(source, header) in &back_edges {
         if let Some(&loop_idx) = header_to_loop.get(&header) {
             // Add to existing loop
-            let body = collect_loop_body(cfg, header, source);
+            let body = collect_loop_body(cfg, header, source, dom);
             loops[loop_idx].body.extend(body);
             loops[loop_idx].back_edges.push((source, header));
         } else {
             // New loop
-            let body = collect_loop_body(cfg, header, source);
+            let body = collect_loop_body(cfg, header, source, dom);
             let id = LoopId(loops.len() as u32);
             header_to_loop.insert(header, loops.len());
             loops.push(LoopInfo {
@@ -173,9 +173,19 @@ pub fn detect_loops(cfg: &Cfg, dom: &DominatorTree) -> LoopForest {
 
 /// Collect the natural loop body for a back edge `source → header`.
 ///
-/// The body includes all blocks that can reach `source` without going
-/// through `header`, plus `header` itself.
-fn collect_loop_body(cfg: &Cfg, header: BlockId, back_edge_source: BlockId) -> BTreeSet<BlockId> {
+/// The body includes all blocks that are dominated by `header` AND can reach
+/// `source` without going through `header`. This matches the classical natural
+/// loop definition (Aho/Sethi/Ullman, Dragon Book).
+///
+/// The dominator check prevents over-inclusion: blocks not dominated by the
+/// header cannot be part of the natural loop (they belong to an outer or
+/// unrelated region).
+fn collect_loop_body(
+    cfg: &Cfg,
+    header: BlockId,
+    back_edge_source: BlockId,
+    dom: &DominatorTree,
+) -> BTreeSet<BlockId> {
     let mut body = BTreeSet::new();
     body.insert(header);
 
@@ -188,6 +198,12 @@ fn collect_loop_body(cfg: &Cfg, header: BlockId, back_edge_source: BlockId) -> B
 
     while let Some(block) = worklist.pop() {
         for pred in cfg.predecessors(block) {
+            // Only include predecessors that are dominated by the header.
+            // This ensures we only capture the natural loop, not unrelated
+            // regions that happen to have a path to the back-edge source.
+            if pred == header || !dom.dominates(header, pred) {
+                continue;
+            }
             if body.insert(pred) {
                 worklist.push(pred);
             }

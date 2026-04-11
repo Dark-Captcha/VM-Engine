@@ -133,8 +133,12 @@ pub(crate) fn recover_region(
                 current = None;
             }
             Terminator::Switch { value, cases, default } => {
-                // v1: emit as if/else chain (switch recovery is v2)
+                // Recover as if/else chain with proper merge-point detection.
+                // Uses post-dominator to find the common exit point so cases
+                // don't over-consume shared code.
                 let val_expr = ctx.var_expr(*value);
+                let merge = ctx.pdom.get(&bid).copied();
+
                 let mut case_stmts: Vec<(Expr, Vec<Stmt>)> = Vec::new();
                 for (case_val, target) in cases {
                     let cond = Expr::binary(
@@ -142,13 +146,14 @@ pub(crate) fn recover_region(
                         val_expr.clone(),
                         Expr::Const(case_val.clone()),
                     );
-                    let body = recover_region(*target, None, ctx, visited);
+                    let body = recover_region(*target, merge, ctx, visited);
                     case_stmts.push((cond, body));
                 }
-                let default_stmts = recover_region(*default, None, ctx, visited);
+                let default_stmts = recover_region(*default, merge, ctx, visited);
 
-                // Build nested if/else from cases
-                let mut result = if default_stmts.is_empty() {
+                // Build nested if/else chain from the inside out.
+                // Start with default as the innermost else branch (None if empty).
+                let mut result: Option<Vec<Stmt>> = if default_stmts.is_empty() {
                     None
                 } else {
                     Some(default_stmts)
@@ -158,11 +163,7 @@ pub(crate) fn recover_region(
                     let if_stmt = Stmt::If {
                         cond,
                         then_body: body,
-                        else_body: result.map(|stmts| vec![Stmt::If {
-                            cond: Expr::Unknown("...".into()),
-                            then_body: stmts,
-                            else_body: None,
-                        }]).or(None),
+                        else_body: result, // Use previous chain directly, no phantom conditions
                     };
                     result = Some(vec![if_stmt]);
                 }
@@ -171,7 +172,7 @@ pub(crate) fn recover_region(
                     stmts.extend(chain);
                 }
 
-                current = None;
+                current = merge;
             }
             Terminator::Unreachable => {
                 current = None;
@@ -320,11 +321,11 @@ mod tests {
         b.branch_if(cond, then_b, else_b);
 
         b.switch_to(then_b);
-        let v1 = b.const_number(1.0);
+        let _v1 = b.const_number(1.0);
         b.jump(merge);
 
         b.switch_to(else_b);
-        let v2 = b.const_number(0.0);
+        let _v2 = b.const_number(0.0);
         b.jump(merge);
 
         b.switch_to(merge);
@@ -394,5 +395,77 @@ mod tests {
         assert!(text.contains("if ("), "got: {text}");
         // Should NOT have an else clause
         assert!(!text.contains("} else {"), "should be if-then without else, got: {text}");
+    }
+
+    #[test]
+    fn recover_switch_no_phantom_conditions() {
+        // Regression: switch recovery used to wrap else branches in phantom
+        // `if (...)` conditions. This test verifies those don't appear anymore.
+        use crate::ir::opcode::{OpCode, Terminator};
+        use crate::ir::{Block, BlockId, FuncId, Function, Instruction, Module};
+        use crate::ir::operand::Operand;
+        use crate::value::Value;
+
+        // Build a switch manually since the builder doesn't have switch() yet
+        let module = Module {
+            functions: vec![Function {
+                id: FuncId(0),
+                name: "switch_test".into(),
+                params: vec![],
+                entry: BlockId(0),
+                blocks: vec![
+                    Block {
+                        id: BlockId(0),
+                        label: "entry".into(),
+                        body: vec![Instruction {
+                            result: Some(crate::ir::Var(0)),
+                            op: OpCode::Const,
+                            operands: vec![Operand::Const(Value::number(1.0))],
+                            source: None,
+                        }],
+                        terminator: Terminator::Switch {
+                            value: crate::ir::Var(0),
+                            cases: vec![
+                                (Value::number(1.0), BlockId(1)),
+                                (Value::number(2.0), BlockId(2)),
+                            ],
+                            default: BlockId(3),
+                        },
+                    },
+                    Block {
+                        id: BlockId(1),
+                        label: "case1".into(),
+                        body: vec![],
+                        terminator: Terminator::Jump { target: BlockId(4) },
+                    },
+                    Block {
+                        id: BlockId(2),
+                        label: "case2".into(),
+                        body: vec![],
+                        terminator: Terminator::Jump { target: BlockId(4) },
+                    },
+                    Block {
+                        id: BlockId(3),
+                        label: "default".into(),
+                        body: vec![],
+                        terminator: Terminator::Jump { target: BlockId(4) },
+                    },
+                    Block {
+                        id: BlockId(4),
+                        label: "merge".into(),
+                        body: vec![],
+                        terminator: Terminator::Halt,
+                    },
+                ],
+            }],
+        };
+
+        let stmts = recover_function(&module.functions[0]);
+        let text: String = stmts.iter().map(|s| s.to_string()).collect();
+
+        // Should NOT contain the phantom "..." condition that was in the old bug
+        assert!(!text.contains("..."), "switch should not emit phantom conditions: {text}");
+        // Should have actual if statements
+        assert!(text.contains("if"), "should have if statements from switch: {text}");
     }
 }

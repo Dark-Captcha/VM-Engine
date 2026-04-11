@@ -137,6 +137,78 @@ mod tests {
     }
 
     #[test]
+    fn new_globals_are_installed() {
+        // Validate that the newly-added stubs for fingerprinting resistance exist
+        let mut heap = Heap::new();
+        let global = heap.alloc();
+        install_all(&mut heap, global, &WebConfig::default());
+
+        // Event listeners
+        assert!(heap.get_property(global, "addEventListener").as_object().is_some());
+        assert!(heap.get_property(global, "removeEventListener").as_object().is_some());
+        assert!(heap.get_property(global, "dispatchEvent").as_object().is_some());
+
+        // Timer functions
+        assert!(heap.get_property(global, "setTimeout").as_object().is_some());
+        assert!(heap.get_property(global, "clearTimeout").as_object().is_some());
+        assert!(heap.get_property(global, "setInterval").as_object().is_some());
+        assert!(heap.get_property(global, "clearInterval").as_object().is_some());
+        assert!(heap.get_property(global, "setImmediate").as_object().is_some());
+
+        // ES6+ globals
+        assert!(heap.get_property(global, "Symbol").as_object().is_some());
+        assert!(heap.get_property(global, "Promise").as_object().is_some());
+        assert!(heap.get_property(global, "Object").as_object().is_some());
+        assert!(heap.get_property(global, "Array").as_object().is_some());
+
+        // Navigator additions
+        let nav = heap.get_property(global, "navigator").as_object().unwrap();
+        assert!(heap.get_property(nav, "permissions").as_object().is_some());
+        assert!(heap.get_property(nav, "geolocation").as_object().is_some());
+        assert!(heap.get_property(nav, "mediaDevices").as_object().is_some());
+        assert!(heap.get_property(nav, "plugins").as_object().is_some());
+        assert!(heap.get_property(nav, "mimeTypes").as_object().is_some());
+
+        // Document additions
+        let doc = heap.get_property(global, "document").as_object().unwrap();
+        assert!(heap.get_property(doc, "head").as_object().is_some());
+        assert!(heap.get_property(doc, "addEventListener").as_object().is_some());
+        assert!(heap.get_property(doc, "getElementById").as_object().is_some());
+    }
+
+    #[test]
+    fn array_coercion_no_nan_cascade() {
+        // Regression test for the PLV3 NaN cascade bug.
+        // Previously: to_number([]) → NaN, to_string([]) → "[object Array]"
+        // Now: to_number([]) → 0, to_string([]) → ""
+        use crate::value::coerce;
+
+        // Empty array
+        assert_eq!(coerce::to_number(&Value::Array(vec![])), 0.0);
+        assert_eq!(coerce::to_string(&Value::Array(vec![])), "");
+
+        // Single element
+        assert_eq!(
+            coerce::to_number(&Value::Array(vec![Value::number(42.0)])),
+            42.0
+        );
+        assert_eq!(
+            coerce::to_string(&Value::Array(vec![Value::number(42.0)])),
+            "42"
+        );
+
+        // Multiple elements → comma-joined string
+        assert_eq!(
+            coerce::to_string(&Value::Array(vec![
+                Value::number(1.0),
+                Value::number(2.0),
+                Value::number(3.0),
+            ])),
+            "1,2,3"
+        );
+    }
+
+    #[test]
     fn plv3_required_apis_all_present() {
         // DataDome PLV3 needs: Date.now, performance.now, Math.random,
         // JSON.stringify, String.fromCharCode, btoa, navigator.webdriver,

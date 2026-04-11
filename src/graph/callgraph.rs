@@ -9,13 +9,26 @@
 
 use std::collections::BTreeMap;
 
-use crate::ir::{FuncId, Module};
+use crate::ir::{BlockId, FuncId, Module};
 use crate::ir::opcode::OpCode;
 use crate::ir::operand::Operand;
 
 // ============================================================================
 // Types
 // ============================================================================
+
+/// Information about an indirect call (target unknown at analysis time).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndirectCallSite {
+    /// Function containing the call.
+    pub caller: FuncId,
+    /// Block containing the call instruction.
+    pub block: BlockId,
+    /// Index of the instruction within the block body.
+    pub instruction: usize,
+    /// True if the call is via CallMethod (obj.method(...)); false for Call(var).
+    pub is_method: bool,
+}
 
 /// Call graph for a module.
 #[derive(Debug, Clone)]
@@ -26,8 +39,10 @@ pub struct CallGraph {
     pub callers: BTreeMap<FuncId, Vec<FuncId>>,
     /// Functions with no callers (entry points).
     pub roots: Vec<FuncId>,
-    /// Functions that call nothing.
+    /// Functions that call nothing (direct or indirect).
     pub leaves: Vec<FuncId>,
+    /// Indirect call sites (variable/method dispatch — target unknown at analysis time).
+    pub indirect_calls: Vec<IndirectCallSite>,
 }
 
 // ============================================================================
@@ -38,6 +53,7 @@ pub struct CallGraph {
 pub fn build_call_graph(module: &Module) -> CallGraph {
     let mut callees: BTreeMap<FuncId, Vec<FuncId>> = BTreeMap::new();
     let mut callers: BTreeMap<FuncId, Vec<FuncId>> = BTreeMap::new();
+    let mut indirect_calls: Vec<IndirectCallSite> = Vec::new();
 
     // Initialize entries for all functions
     for func in &module.functions {
@@ -45,17 +61,42 @@ pub fn build_call_graph(module: &Module) -> CallGraph {
         callers.entry(func.id).or_default();
     }
 
-    // Scan all instructions for Call/CallMethod with FuncRef operands
+    // Scan all instructions for Call/CallMethod, tracking both direct and indirect calls.
     for func in &module.functions {
         for block in &func.blocks {
-            for instr in &block.body {
+            for (idx, instr) in block.body.iter().enumerate() {
                 if !matches!(instr.op, OpCode::Call | OpCode::CallMethod) {
                     continue;
                 }
-                for operand in &instr.operands {
-                    if let Operand::Func(callee_id) = operand {
-                        callees.entry(func.id).or_default().push(*callee_id);
-                        callers.entry(*callee_id).or_default().push(func.id);
+
+                // Determine the target operand:
+                // - Call:       first operand is the target (Func, Var, or Const)
+                // - CallMethod: first operand is the object, second is the method name
+                let target_idx = match instr.op {
+                    OpCode::Call => 0,
+                    OpCode::CallMethod => 0, // object operand — method lookup is dynamic
+                    _ => continue,
+                };
+
+                let is_method = matches!(instr.op, OpCode::CallMethod);
+
+                if let Some(operand) = instr.operands.get(target_idx) {
+                    match operand {
+                        Operand::Func(callee_id) => {
+                            // Direct call — add to callees/callers graph
+                            callees.entry(func.id).or_default().push(*callee_id);
+                            callers.entry(*callee_id).or_default().push(func.id);
+                        }
+                        Operand::Var(_) | Operand::Const(_) => {
+                            // Indirect call — record site (target unknown statically)
+                            indirect_calls.push(IndirectCallSite {
+                                caller: func.id,
+                                block: block.id,
+                                instruction: idx,
+                                is_method,
+                            });
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -77,12 +118,16 @@ pub fn build_call_graph(module: &Module) -> CallGraph {
         .map(|(&k, _)| k)
         .collect();
 
+    // A function is a leaf only if it has no direct callees AND no indirect calls
+    let has_indirect: std::collections::HashSet<FuncId> = indirect_calls.iter()
+        .map(|ic| ic.caller)
+        .collect();
     let leaves: Vec<FuncId> = callees.iter()
-        .filter(|(_, v)| v.is_empty())
+        .filter(|(k, v)| v.is_empty() && !has_indirect.contains(k))
         .map(|(&k, _)| k)
         .collect();
 
-    CallGraph { callees, callers, roots, leaves }
+    CallGraph { callees, callers, roots, leaves, indirect_calls }
 }
 
 // ============================================================================
@@ -163,5 +208,30 @@ mod tests {
 
         assert_eq!(cg.roots, vec![FuncId(2)]); // a is the root
         assert_eq!(cg.leaves, vec![FuncId(0)]); // c is the leaf
+    }
+
+    #[test]
+    fn indirect_calls_are_tracked() {
+        use crate::ir::opcode::OpCode;
+
+        let mut b = IrBuilder::new();
+        b.begin_function("main");
+        b.create_and_switch("entry");
+        // Create a callable via LoadScope and call it (indirect call via Var)
+        let fn_var = b.load_scope("someFunction");
+        let _result = b.emit(OpCode::Call, vec![Operand::Var(fn_var)]);
+        b.halt();
+        b.end_function();
+
+        let module = b.build();
+        let cg = build_call_graph(&module);
+
+        // Indirect call should be recorded
+        assert_eq!(cg.indirect_calls.len(), 1);
+        assert_eq!(cg.indirect_calls[0].caller, FuncId(0));
+        assert!(!cg.indirect_calls[0].is_method);
+
+        // Function with indirect calls should NOT be a leaf
+        assert!(!cg.leaves.contains(&FuncId(0)));
     }
 }

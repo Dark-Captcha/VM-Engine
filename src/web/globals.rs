@@ -125,6 +125,154 @@ pub fn install_globals(heap: &mut Heap, global: ObjectId) {
         }
     });
     heap.set_property(global, "Uint8Array", Value::Object(uint8array_ctor));
+
+    // Event listener stubs (no-op but returns correctly typed values)
+    let add_event_listener = heap.alloc_native(|_args, _heap| {
+        // addEventListener(type, listener, options?) — no-op in VM
+        Value::Undefined
+    });
+    heap.set_property(global, "addEventListener", Value::Object(add_event_listener));
+
+    let remove_event_listener = heap.alloc_native(|_args, _heap| {
+        // removeEventListener(type, listener, options?) — no-op
+        Value::Undefined
+    });
+    heap.set_property(global, "removeEventListener", Value::Object(remove_event_listener));
+
+    let dispatch_event = heap.alloc_native(|_args, _heap| {
+        // dispatchEvent(event) — always returns true (event not cancelled)
+        Value::bool(true)
+    });
+    heap.set_property(global, "dispatchEvent", Value::Object(dispatch_event));
+
+    // Timer stubs — execute immediately (no async in VM)
+    let set_timeout = heap.alloc_native(|args, heap| {
+        // setTimeout(callback, delay?, ...args) → timerId
+        // We execute callback immediately since VM doesn't support async
+        if let Some(Value::Object(callback_oid)) = args.first() {
+            let callback_args = if args.len() > 2 { &args[2..] } else { &[] };
+            let _ = heap.call(*callback_oid, callback_args);
+        }
+        // Return a fake timer ID
+        Value::number(1.0)
+    });
+    heap.set_property(global, "setTimeout", Value::Object(set_timeout));
+
+    let set_interval = heap.alloc_native(|_args, _heap| {
+        // setInterval — return timer ID, but don't actually repeat
+        Value::number(2.0)
+    });
+    heap.set_property(global, "setInterval", Value::Object(set_interval));
+
+    let clear_timeout = heap.alloc_native(|_args, _heap| {
+        // clearTimeout — no-op
+        Value::Undefined
+    });
+    heap.set_property(global, "clearTimeout", Value::Object(clear_timeout));
+
+    let clear_interval = heap.alloc_native(|_args, _heap| {
+        // clearInterval — no-op
+        Value::Undefined
+    });
+    heap.set_property(global, "clearInterval", Value::Object(clear_interval));
+
+    let set_immediate = heap.alloc_native(|args, heap| {
+        // setImmediate(callback, ...args) — execute immediately
+        if let Some(Value::Object(callback_oid)) = args.first() {
+            let callback_args = if args.len() > 1 { &args[1..] } else { &[] };
+            let _ = heap.call(*callback_oid, callback_args);
+        }
+        Value::number(3.0)
+    });
+    heap.set_property(global, "setImmediate", Value::Object(set_immediate));
+
+    // Symbol stub (basic support)
+    let symbol_ctor = heap.alloc_native(|args, _heap| {
+        let desc = args.first()
+            .map(crate::value::coerce::to_string)
+            .unwrap_or_default();
+        // Return a string representation since we don't have real Symbol type
+        Value::string(format!("Symbol({})", desc))
+    });
+    heap.set_property(global, "Symbol", Value::Object(symbol_ctor));
+
+    // Promise stub (returns resolved-like object)
+    let promise_ctor = heap.alloc_native(|args, heap| {
+        let promise_obj = heap.alloc();
+        // Call executor(resolve, reject) immediately with stub resolvers
+        if let Some(Value::Object(executor)) = args.first() {
+            let resolve_fn = heap.alloc_native(|_args, _heap| Value::Undefined);
+            let reject_fn = heap.alloc_native(|_args, _heap| Value::Undefined);
+            let _ = heap.call(*executor, &[Value::Object(resolve_fn), Value::Object(reject_fn)]);
+        }
+        // Add .then() stub
+        let then_fn = heap.alloc_native(|_args, _heap| Value::Undefined);
+        heap.set_property(promise_obj, "then", Value::Object(then_fn));
+        let catch_fn = heap.alloc_native(|_args, _heap| Value::Undefined);
+        heap.set_property(promise_obj, "catch", Value::Object(catch_fn));
+        Value::Object(promise_obj)
+    });
+    // Promise.resolve()
+    let promise_resolve = heap.alloc_native(|args, heap| {
+        let promise_obj = heap.alloc();
+        let then_fn = heap.alloc_native(|callback_args, heap| {
+            if let Some(Value::Object(callback)) = callback_args.first() {
+                let _ = heap.call(*callback, &[]);
+            }
+            Value::Undefined
+        });
+        heap.set_property(promise_obj, "then", Value::Object(then_fn));
+        heap.set_property(promise_obj, "value", args.first().cloned().unwrap_or(Value::Undefined));
+        Value::Object(promise_obj)
+    });
+    heap.set_property(promise_ctor, "resolve", Value::Object(promise_resolve));
+    heap.set_property(global, "Promise", Value::Object(promise_ctor));
+
+    // Object constructor stubs
+    let object_ctor = heap.alloc_native(|_args, heap| {
+        Value::Object(heap.alloc())
+    });
+    let object_keys = heap.alloc_native(|args, heap| {
+        if let Some(Value::Object(oid)) = args.first() {
+            if let Some(obj) = heap.get(*oid) {
+                let keys: Vec<Value> = obj.properties.keys()
+                    .map(|k| Value::string(k.clone()))
+                    .collect();
+                return Value::Array(keys);
+            }
+        }
+        Value::Array(vec![])
+    });
+    heap.set_property(object_ctor, "keys", Value::Object(object_keys));
+    let object_values = heap.alloc_native(|args, heap| {
+        if let Some(Value::Object(oid)) = args.first() {
+            if let Some(obj) = heap.get(*oid) {
+                let values: Vec<Value> = obj.properties.values().cloned().collect();
+                return Value::Array(values);
+            }
+        }
+        Value::Array(vec![])
+    });
+    heap.set_property(object_ctor, "values", Value::Object(object_values));
+    heap.set_property(global, "Object", Value::Object(object_ctor));
+
+    // Array constructor stubs
+    let array_ctor = heap.alloc_native(|args, _heap| {
+        if args.len() == 1 {
+            if let Some(n) = args[0].as_number() {
+                // new Array(length)
+                let len = n as usize;
+                return Value::Array(vec![Value::Undefined; len]);
+            }
+        }
+        // new Array(...items)
+        Value::Array(args.to_vec())
+    });
+    let array_is_array = heap.alloc_native(|args, _heap| {
+        Value::bool(matches!(args.first(), Some(Value::Array(_))))
+    });
+    heap.set_property(array_ctor, "isArray", Value::Object(array_is_array));
+    heap.set_property(global, "Array", Value::Object(array_ctor));
 }
 
 // ============================================================================

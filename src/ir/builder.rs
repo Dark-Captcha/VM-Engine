@@ -133,9 +133,18 @@ impl IrBuilder {
     // ── Instruction emission ─────────────────────────────────────────
 
     /// Emit an instruction that produces a result.
+    ///
+    /// # Panics
+    /// Panics if the current block already has a terminator set (other than the
+    /// `Unreachable` placeholder). Emit instructions before calling jump/branch/ret/halt/throw.
     pub fn emit(&mut self, op: OpCode, operands: Vec<Operand>) -> Var {
         let var = self.fresh_var();
         let block = self.current_block_mut();
+        debug_assert!(
+            matches!(block.terminator, Terminator::Unreachable),
+            "IrBuilder::emit called after terminator was set on block '{}'",
+            block.label,
+        );
         block.body.push(Instruction {
             result: Some(var),
             op,
@@ -146,8 +155,16 @@ impl IrBuilder {
     }
 
     /// Emit an instruction that produces no result (void).
+    ///
+    /// # Panics
+    /// Panics if the current block already has a terminator set.
     pub fn emit_void(&mut self, op: OpCode, operands: Vec<Operand>) {
         let block = self.current_block_mut();
+        debug_assert!(
+            matches!(block.terminator, Terminator::Unreachable),
+            "IrBuilder::emit_void called after terminator was set on block '{}'",
+            block.label,
+        );
         block.body.push(Instruction {
             result: None,
             op,
@@ -157,9 +174,17 @@ impl IrBuilder {
     }
 
     /// Emit an instruction with source location.
+    ///
+    /// # Panics
+    /// Panics if the current block already has a terminator set.
     pub fn emit_sourced(&mut self, op: OpCode, operands: Vec<Operand>, source: SourceLoc) -> Var {
         let var = self.fresh_var();
         let block = self.current_block_mut();
+        debug_assert!(
+            matches!(block.terminator, Terminator::Unreachable),
+            "IrBuilder::emit_sourced called after terminator was set on block '{}'",
+            block.label,
+        );
         block.body.push(Instruction {
             result: Some(var),
             op,
@@ -309,6 +334,16 @@ impl IrBuilder {
         ]);
     }
 
+    /// `%r = key in obj`
+    pub fn has_prop(&mut self, obj: Var, key: Var) -> Var {
+        self.emit(OpCode::HasProp, vec![Operand::Var(obj), Operand::Var(key)])
+    }
+
+    /// `%r = delete obj[key]`
+    pub fn delete_prop(&mut self, obj: Var, key: Var) -> Var {
+        self.emit(OpCode::DeleteProp, vec![Operand::Var(obj), Operand::Var(key)])
+    }
+
     /// `%r = scope[name]`
     pub fn load_scope(&mut self, name: &str) -> Var {
         self.emit(OpCode::LoadScope, vec![Operand::Const(Value::string(name))])
@@ -371,9 +406,31 @@ impl IrBuilder {
 
     // ── Build ────────────────────────────────────────────────────────
 
-    /// Finalize and return the constructed [`Module`].
+    /// Finalize and return the constructed [`Module`] without validation.
+    ///
+    /// Use [`build_validated`] instead if you want to check for structural
+    /// errors like undefined variables, missing terminators, or bad operand
+    /// arities.
+    ///
+    /// [`build_validated`]: Self::build_validated
     pub fn build(self) -> Module {
         Module { functions: self.functions }
+    }
+
+    /// Finalize and validate the constructed [`Module`].
+    ///
+    /// Returns an error if the module has structural issues such as:
+    /// - Undefined variable references
+    /// - Undefined function references
+    /// - Blocks with unset terminators (still `Unreachable`)
+    /// - Wrong operand counts for opcodes
+    /// - Duplicate switch case values
+    ///
+    /// Use this at the end of a decoder to catch bugs early.
+    pub fn build_validated(self) -> crate::error::Result<Module> {
+        let module = Module { functions: self.functions };
+        super::validate::validate(&module)?;
+        Ok(module)
     }
 
     // ── Internal ─────────────────────────────────────────────────────

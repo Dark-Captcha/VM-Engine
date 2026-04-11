@@ -119,30 +119,202 @@ fn escape_json_string(input: &str) -> String {
 // JSON.parse
 // ============================================================================
 
-fn json_parse(args: &[Value], _heap: &mut Heap) -> Value {
+fn json_parse(args: &[Value], heap: &mut Heap) -> Value {
     let Some(Value::String(input)) = args.first() else {
         return Value::Undefined;
     };
-    parse_json_value(input.trim())
+    let mut parser = JsonParser::new(input, heap);
+    parser.parse_value().unwrap_or(Value::Undefined)
 }
 
-/// Minimal JSON parser for primitive values and simple structures.
-fn parse_json_value(input: &str) -> Value {
-    let trimmed = input.trim();
-    match trimmed {
-        "null" => Value::Null,
-        "true" => Value::Bool(true),
-        "false" => Value::Bool(false),
-        "undefined" => Value::Undefined,
-        _ if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 => {
-            Value::string(&trimmed[1..trimmed.len() - 1])
+/// Recursive JSON parser with object/array support.
+struct JsonParser<'a> {
+    chars: std::iter::Peekable<std::str::Chars<'a>>,
+    heap: &'a mut Heap,
+    depth: usize,
+}
+
+impl<'a> JsonParser<'a> {
+    fn new(input: &'a str, heap: &'a mut Heap) -> Self {
+        Self {
+            chars: input.chars().peekable(),
+            heap,
+            depth: 0,
         }
-        _ => {
-            // Try parsing as number
-            if let Ok(number) = trimmed.parse::<f64>() {
-                Value::number(number)
+    }
+
+    fn parse_value(&mut self) -> Option<Value> {
+        if self.depth > 32 {
+            return None; // Guard against deeply nested JSON
+        }
+        self.skip_whitespace();
+        match self.chars.peek()? {
+            '{' => self.parse_object(),
+            '[' => self.parse_array(),
+            '"' => self.parse_string(),
+            't' | 'f' => self.parse_bool(),
+            'n' => self.parse_null(),
+            c if c.is_ascii_digit() || *c == '-' => self.parse_number(),
+            _ => None,
+        }
+    }
+
+    fn parse_object(&mut self) -> Option<Value> {
+        self.depth += 1;
+        self.chars.next(); // consume '{'
+        self.skip_whitespace();
+
+        let obj = self.heap.alloc();
+
+        if self.chars.peek() == Some(&'}') {
+            self.chars.next();
+            self.depth -= 1;
+            return Some(Value::Object(obj));
+        }
+
+        loop {
+            self.skip_whitespace();
+            // Parse key (must be string)
+            if self.chars.peek() != Some(&'"') {
+                self.depth -= 1;
+                return None;
+            }
+            let key = self.parse_string()?.as_str().map(|s| s.to_string())?;
+
+            self.skip_whitespace();
+            if self.chars.next() != Some(':') {
+                self.depth -= 1;
+                return None;
+            }
+
+            // Parse value
+            let value = self.parse_value()?;
+            self.heap.set_property(obj, &key, value);
+
+            self.skip_whitespace();
+            match self.chars.peek() {
+                Some(',') => { self.chars.next(); }
+                Some('}') => { self.chars.next(); break; }
+                _ => { self.depth -= 1; return None; }
+            }
+        }
+        self.depth -= 1;
+        Some(Value::Object(obj))
+    }
+
+    fn parse_array(&mut self) -> Option<Value> {
+        self.depth += 1;
+        self.chars.next(); // consume '['
+        self.skip_whitespace();
+
+        let mut elements = Vec::new();
+
+        if self.chars.peek() == Some(&']') {
+            self.chars.next();
+            self.depth -= 1;
+            return Some(Value::Array(elements));
+        }
+
+        loop {
+            let value = self.parse_value()?;
+            elements.push(value);
+
+            self.skip_whitespace();
+            match self.chars.peek() {
+                Some(',') => { self.chars.next(); }
+                Some(']') => { self.chars.next(); break; }
+                _ => { self.depth -= 1; return None; }
+            }
+        }
+        self.depth -= 1;
+        Some(Value::Array(elements))
+    }
+
+    fn parse_string(&mut self) -> Option<Value> {
+        self.chars.next(); // consume '"'
+        let mut s = String::new();
+        loop {
+            match self.chars.next()? {
+                '"' => break,
+                '\\' => {
+                    match self.chars.next()? {
+                        '"' => s.push('"'),
+                        '\\' => s.push('\\'),
+                        '/' => s.push('/'),
+                        'n' => s.push('\n'),
+                        'r' => s.push('\r'),
+                        't' => s.push('\t'),
+                        'b' => s.push('\x08'),
+                        'f' => s.push('\x0C'),
+                        'u' => {
+                            // Parse \uXXXX
+                            let mut hex = String::with_capacity(4);
+                            for _ in 0..4 {
+                                hex.push(self.chars.next()?);
+                            }
+                            let code = u32::from_str_radix(&hex, 16).ok()?;
+                            if let Some(c) = char::from_u32(code) {
+                                s.push(c);
+                            }
+                        }
+                        _ => return None,
+                    }
+                }
+                c => s.push(c),
+            }
+        }
+        Some(Value::string(s))
+    }
+
+    fn parse_number(&mut self) -> Option<Value> {
+        let mut num_str = String::new();
+        if self.chars.peek() == Some(&'-') {
+            num_str.push(self.chars.next()?);
+        }
+        while let Some(&c) = self.chars.peek() {
+            if c.is_ascii_digit() || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-' {
+                // Only allow +/- after e/E
+                if (c == '+' || c == '-') && !num_str.ends_with('e') && !num_str.ends_with('E') {
+                    break;
+                }
+                num_str.push(self.chars.next()?);
             } else {
-                Value::Undefined
+                break;
+            }
+        }
+        num_str.parse::<f64>().ok().map(Value::number)
+    }
+
+    fn parse_bool(&mut self) -> Option<Value> {
+        let word: String = self.chars.by_ref().take(4).collect();
+        if word == "true" {
+            Some(Value::bool(true))
+        } else if &word[..] == "fals" {
+            if self.chars.next() == Some('e') {
+                Some(Value::bool(false))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    fn parse_null(&mut self) -> Option<Value> {
+        let word: String = self.chars.by_ref().take(4).collect();
+        if word == "null" {
+            Some(Value::Null)
+        } else {
+            None
+        }
+    }
+
+    fn skip_whitespace(&mut self) {
+        while let Some(&c) = self.chars.peek() {
+            if c.is_whitespace() {
+                self.chars.next();
+            } else {
+                break;
             }
         }
     }
@@ -192,7 +364,7 @@ mod tests {
 
     #[test]
     fn stringify_array() {
-        let mut heap = Heap::new();
+        let heap = Heap::new();
         let array = Value::Array(vec![Value::number(1.0), Value::number(2.0), Value::number(3.0)]);
 
         assert_eq!(value_to_json(&array, &heap, 0), "[1,2,3]");
@@ -212,10 +384,67 @@ mod tests {
 
     #[test]
     fn parse_primitives() {
-        assert_eq!(parse_json_value("42"), Value::number(42.0));
-        assert_eq!(parse_json_value("true"), Value::Bool(true));
-        assert_eq!(parse_json_value("null"), Value::Null);
-        assert_eq!(parse_json_value("\"hello\""), Value::string("hello"));
+        let mut heap = Heap::new();
+        let global = heap.alloc();
+        install_json(&mut heap, global);
+        let json = heap.get_property(global, "JSON").as_object().unwrap();
+        let parse = heap.get_property(json, "parse").as_object().unwrap();
+
+        assert_eq!(heap.call(parse, &[Value::string("42")]).unwrap(), Value::number(42.0));
+        assert_eq!(heap.call(parse, &[Value::string("true")]).unwrap(), Value::bool(true));
+        assert_eq!(heap.call(parse, &[Value::string("null")]).unwrap(), Value::Null);
+        assert_eq!(heap.call(parse, &[Value::string("\"hello\"")]).unwrap(), Value::string("hello"));
+    }
+
+    #[test]
+    fn parse_object() {
+        let mut heap = Heap::new();
+        let global = heap.alloc();
+        install_json(&mut heap, global);
+        let json = heap.get_property(global, "JSON").as_object().unwrap();
+        let parse = heap.get_property(json, "parse").as_object().unwrap();
+
+        let result = heap.call(parse, &[Value::string(r#"{"name":"test","value":42}"#)]).unwrap();
+        if let Value::Object(oid) = result {
+            assert_eq!(heap.get_property(oid, "name"), Value::string("test"));
+            assert_eq!(heap.get_property(oid, "value"), Value::number(42.0));
+        } else {
+            panic!("expected object, got: {result:?}");
+        }
+    }
+
+    #[test]
+    fn parse_array() {
+        let mut heap = Heap::new();
+        let global = heap.alloc();
+        install_json(&mut heap, global);
+        let json = heap.get_property(global, "JSON").as_object().unwrap();
+        let parse = heap.get_property(json, "parse").as_object().unwrap();
+
+        let result = heap.call(parse, &[Value::string("[1,2,3]")]).unwrap();
+        if let Value::Array(arr) = result {
+            assert_eq!(arr.len(), 3);
+            assert_eq!(arr[0], Value::number(1.0));
+            assert_eq!(arr[1], Value::number(2.0));
+            assert_eq!(arr[2], Value::number(3.0));
+        } else {
+            panic!("expected array, got: {result:?}");
+        }
+    }
+
+    #[test]
+    fn parse_escape_sequences() {
+        let mut heap = Heap::new();
+        let global = heap.alloc();
+        install_json(&mut heap, global);
+        let json = heap.get_property(global, "JSON").as_object().unwrap();
+        let parse = heap.get_property(json, "parse").as_object().unwrap();
+
+        let result = heap.call(parse, &[Value::string(r#""hello\nworld""#)]).unwrap();
+        assert_eq!(result, Value::string("hello\nworld"));
+
+        let result2 = heap.call(parse, &[Value::string(r#""say \"hi\"""#)]).unwrap();
+        assert_eq!(result2, Value::string("say \"hi\""));
     }
 
     #[test]

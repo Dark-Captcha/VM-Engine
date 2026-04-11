@@ -165,11 +165,11 @@ mod tests {
         b.branch_if(cond, then_b, else_b);
 
         b.switch_to(then_b);
-        let v1 = b.const_number(1.0);
+        let _v1 = b.const_number(1.0);
         b.jump(merge);
 
         b.switch_to(else_b);
-        let v2 = b.const_number(0.0);
+        let _v2 = b.const_number(0.0);
         b.jump(merge);
 
         b.switch_to(merge);

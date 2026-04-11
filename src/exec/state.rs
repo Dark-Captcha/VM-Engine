@@ -43,6 +43,9 @@ impl fmt::Display for Cursor {
 pub struct CallFrame {
     /// Where to resume after return.
     pub return_cursor: Cursor,
+    /// The Var in the caller that should receive the return value.
+    /// `None` if the call was made via a `emit_void` (no result expected).
+    pub result_var: Option<Var>,
     /// Scope chain depth to restore.
     pub scope_depth: usize,
     /// Saved local variable bindings.
